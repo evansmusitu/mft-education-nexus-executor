@@ -1,0 +1,23 @@
+name: MFT Nexus Executor Hosted Runner Canary V1
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  canary:
+    name: provider-free-hosted-runner-canary
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Provider-free probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "MFT Education Nexus executor canary"
+          echo "No checkout, no third-party actions, no repository secrets, no provider credentials"
+          uname -a
+          python3 --version
+          echo "CANARY_PASS"
