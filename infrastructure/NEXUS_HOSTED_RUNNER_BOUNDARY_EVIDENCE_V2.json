@@ -1,0 +1,91 @@
+{
+  "schema": "mft.education_nexus.executor.hosted_runner_boundary.v2",
+  "mode": "INFRASTRUCTURE_EVIDENCE_ONLY",
+  "scope": "EDUCATION_NEXUS_ONLY",
+  "recorded_date": "2026-09-12",
+  "executor_repository": "evansmusitu/mft-education-nexus-executor",
+  "architecture_commit": "64c6558c5029716b63cfd7efa32c3d92561c4a8d",
+  "canary_manual_only_commit": "01c30bbaee1ea4ebddd34e279b0eea2452ac1dad",
+  "hosted_runner_canary": {
+    "workflow": ".github/workflows/mft-nexus-executor-hosted-runner-canary-v1.yml",
+    "run_id": 34705777023,
+    "attempts": [
+      {
+        "attempt": 1,
+        "job_id": 103585431484,
+        "conclusion": "failure",
+        "runner_id": 0,
+        "runner_name": "",
+        "steps": []
+      },
+      {
+        "attempt": 2,
+        "job_id": 103588653264,
+        "conclusion": "failure",
+        "runner_id": 0,
+        "runner_name": "",
+        "steps": []
+      }
+    ],
+    "provider_free": true,
+    "uses_checkout": false,
+    "uses_third_party_actions": false,
+    "uses_repository_secrets": false,
+    "uses_cloudflare_credentials": false,
+    "uses_modal_credentials": false
+  },
+  "provider_workflow_controls": {
+    "modal": {
+      "run_id": 34705767852,
+      "job_id": 103585406236,
+      "conclusion": "failure",
+      "logs_url": null,
+      "steps": null
+    },
+    "cloudflare": {
+      "run_id": 34705747205,
+      "job_id": 103585352034,
+      "conclusion": "failure",
+      "logs_url": null,
+      "steps": null
+    }
+  },
+  "established": [
+    "The fresh Nexus executor repository reproduces the hosted-runner failure before any workflow step executes.",
+    "The provider-free canary reproduces the failure twice without checkout, third-party actions, repository secrets, Cloudflare credentials, or Modal credentials.",
+    "Both canary attempts completed with runner_id=0 and an empty step list.",
+    "The Cloudflare and Modal workflows also fail before any step executes, so their provider credentials and scripts are not reached.",
+    "The candidate and sealed authority branches were not modified by this executor work.",
+    "No Axiom repository, runner, credential, storage, verifier, or infrastructure was used."
+  ],
+  "not_established": [
+    "A specific GitHub billing, spending-limit, policy, entitlement, or account-state cause.",
+    "Cloudflare credential failure.",
+    "Modal credential failure.",
+    "Successful Cloudflare deployment.",
+    "Successful Modal execution.",
+    "Phase 1 114/114.",
+    "Phase 2 admission or credit.",
+    "Independent authority PASS.",
+    "RFINAL."
+  ],
+  "frontier": {
+    "phase1": "112/114",
+    "phase2": "0/49",
+    "phase2_started": false,
+    "phase3": "0/20",
+    "phase3_started": false,
+    "rows_6_8_closed": false,
+    "authority_issue_1": "OPEN"
+  },
+  "external_boundary": "GitHub must assign a usable executor substrate for the Nexus workflows, or a directly authorized Nexus Modal/Cloudflare execution connection must be available. Until then, provider code cannot be exercised and no gate credit can be claimed.",
+  "guardrails": {
+    "candidate_modified": false,
+    "authority_modified": false,
+    "trusted_verifier_modified": false,
+    "self_certification": false,
+    "thresholds_weakened": false,
+    "failed_attempt_counted_as_pass": false,
+    "axiom_dependency": false
+  }
+}
