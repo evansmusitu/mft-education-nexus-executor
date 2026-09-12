@@ -1,0 +1,156 @@
+name: MFT Nexus Modal Runtime Preadmission V1
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/mft-nexus-modal-runtime-preadmission-v1.yml'
+      - 'infrastructure/NEXUS_EXECUTOR_BOUNDARY.json'
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+  MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+  NEXUS_SOURCE_TOKEN: ${{ secrets.NEXUS_SOURCE_TOKEN }}
+  SOURCE_REPO: evansmusitu/mft-education-nexus-a10-staging2
+  SOURCE_INFRA_COMMIT: 3636728257843b44c44a8ccd6e3ecc0e9185cf4c
+  SOURCE_MODAL_PATH: infrastructure/nexus-modal-plane/modal_app.py
+  SOURCE_MODAL_BLOB: fe1ac87da9b64cf6bd56bf0efb2003a850bbe1db
+  SOURCE_BUILD_PATH: infrastructure/nexus-build-plane/Invoke-NexusRuntimeBuild-WineV1.sh
+  SOURCE_BUILD_BLOB: 4ff6bf870ab925c58d751732f3ecb1af4cd37ae8
+  CANONICAL_DRIVE_FILE_ID: 1j3DeGoRzmf1yGx1UWS1JxqvJHbED4MNw
+  CANONICAL_NAME: 01_FROZEN_CANONICAL_MFT_EDUCATION_NEXUS_2026-09-04.zip
+  CANONICAL_SHA256: 3fb025b05128e36fa25a5ae298a56cb7fd9d8bba91787b0003436a0069738b64
+  CANONICAL_BYTES: '8526465'
+  RUNTIME_ASSET_ID: '546192327'
+  RUNTIME_NAME: mft-phase1-native-runtime-root-v1.zip
+  RUNTIME_SHA256: 03a5148acf8f7b7d07d116ec76980162280aacbd3a3acf997522d3b028237350
+  RUNTIME_BYTES: '200225958'
+  MODAL_INPUT_VOLUME: mft-nexus-build-inputs
+  MODAL_OUTPUT_VOLUME: mft-nexus-build-evidence
+
+jobs:
+  preadmission:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Fail closed unless Nexus execution credentials exist
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${MODAL_TOKEN_ID:-}" || exit 20
+          test -n "${MODAL_TOKEN_SECRET:-}" || exit 21
+          test -n "${NEXUS_SOURCE_TOKEN:-}" || exit 22
+
+      - name: Install pinned transport and Modal SDK
+        shell: bash
+        run: python -m pip install --disable-pip-version-check --no-cache-dir 'gdown==5.2.0' 'modal==1.5.5'
+
+      - name: Acquire exact pinned Nexus execution sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p infrastructure/nexus-modal-plane infrastructure/nexus-build-plane
+          fetch_source() {
+            local path="$1" out="$2"
+            curl --fail --location --retry 3 \
+              -H "Authorization: Bearer ${NEXUS_SOURCE_TOKEN}" \
+              -H 'Accept: application/vnd.github.raw+json' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "https://api.github.com/repos/${SOURCE_REPO}/contents/${path}?ref=${SOURCE_INFRA_COMMIT}" \
+              -o "$out"
+          }
+          fetch_source "$SOURCE_MODAL_PATH" "$SOURCE_MODAL_PATH"
+          fetch_source "$SOURCE_BUILD_PATH" "$SOURCE_BUILD_PATH"
+          python - <<'PY'
+          import hashlib, os, pathlib
+          checks = [
+              (os.environ['SOURCE_MODAL_PATH'], os.environ['SOURCE_MODAL_BLOB']),
+              (os.environ['SOURCE_BUILD_PATH'], os.environ['SOURCE_BUILD_BLOB']),
+          ]
+          for filename, expected in checks:
+              data = pathlib.Path(filename).read_bytes()
+              actual = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+              assert actual == expected, (filename, actual, expected)
+              print(f'pinned_source_verified {filename} git_blob={actual}')
+          PY
+          chmod 0555 "$SOURCE_BUILD_PATH"
+
+      - name: Acquire and verify exact frozen canonical ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .nexus-modal-inputs
+          gdown --fuzzy "https://drive.google.com/file/d/${CANONICAL_DRIVE_FILE_ID}/view?usp=drivesdk" -O ".nexus-modal-inputs/${CANONICAL_NAME}"
+          python - <<'PY'
+          import hashlib, os, pathlib
+          p = pathlib.Path('.nexus-modal-inputs') / os.environ['CANONICAL_NAME']
+          assert p.stat().st_size == int(os.environ['CANONICAL_BYTES'])
+          assert hashlib.sha256(p.read_bytes()).hexdigest() == os.environ['CANONICAL_SHA256']
+          PY
+
+      - name: Acquire and verify exact retained runtime archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 --retry-delay 2 \
+            -H "Authorization: Bearer ${NEXUS_SOURCE_TOKEN}" \
+            -H 'Accept: application/octet-stream' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${SOURCE_REPO}/releases/assets/${RUNTIME_ASSET_ID}" \
+            -o ".nexus-modal-inputs/${RUNTIME_NAME}"
+          python - <<'PY'
+          import hashlib, os, pathlib
+          p = pathlib.Path('.nexus-modal-inputs') / os.environ['RUNTIME_NAME']
+          assert p.stat().st_size == int(os.environ['RUNTIME_BYTES'])
+          assert hashlib.sha256(p.read_bytes()).hexdigest() == os.environ['RUNTIME_SHA256']
+          PY
+
+      - name: Deploy Nexus Modal execution plane
+        shell: bash
+        run: modal deploy infrastructure/nexus-modal-plane/modal_app.py --name mft-education-nexus-build-plane
+
+      - name: Replace Modal input volume with verified bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          modal volume rm -r "${MODAL_INPUT_VOLUME}" / || true
+          modal volume put -f "${MODAL_INPUT_VOLUME}" ".nexus-modal-inputs/${CANONICAL_NAME}" "/${CANONICAL_NAME}"
+          modal volume put -f "${MODAL_INPUT_VOLUME}" ".nexus-modal-inputs/${RUNTIME_NAME}" "/${RUNTIME_NAME}"
+
+      - name: Execute frozen Windows/Wine build contract on Modal
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUN_LABEL="gh-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "RUN_LABEL=${RUN_LABEL}" >> "$GITHUB_ENV"
+          modal run infrastructure/nexus-modal-plane/modal_app.py --run-label "${RUN_LABEL}"
+
+      - name: Retrieve append-only Modal evidence
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p modal-evidence
+          if [[ -n "${RUN_LABEL:-}" ]]; then
+            modal volume get --force "${MODAL_OUTPUT_VOLUME}" "/runtime-preadmission-modal-v1/${RUN_LABEL}" modal-evidence || true
+          fi
+
+      - name: Upload Modal preadmission evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mft-nexus-modal-runtime-preadmission-${{ github.run_id }}-${{ github.run_attempt }}
+          path: modal-evidence
+          if-no-files-found: warn
+          retention-days: 30
