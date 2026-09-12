@@ -1,0 +1,57 @@
+{
+  "schema": "mft.education_nexus.infrastructure.cloudflare_github_modal_plane.v1",
+  "scope": "EDUCATION_NEXUS_ONLY",
+  "mode": "PRE_ADMISSION_ENGINEERING_ONLY",
+  "executor_repository": "evansmusitu/mft-education-nexus-executor",
+  "architecture": {
+    "cloudflare": "Nexus-owned authenticated edge/control ingress into the executor GitHub workflow; never an authority or certifier",
+    "github": "Nexus-owned source/control plane, exact-input integrity gate, workflow orchestration, and evidence artifact plane",
+    "modal": "Nexus-owned execution plane for the frozen Windows/Wine build contract and persistent evidence"
+  },
+  "pinned_nexus_execution_source": {
+    "repository": "evansmusitu/mft-education-nexus-a10-staging2",
+    "commit": "3636728257843b44c44a8ccd6e3ecc0e9185cf4c",
+    "modal_app_git_blob": "fe1ac87da9b64cf6bd56bf0efb2003a850bbe1db",
+    "build_script_git_blob": "4ff6bf870ab925c58d751732f3ecb1af4cd37ae8"
+  },
+  "frozen_canonical": {
+    "file": "01_FROZEN_CANONICAL_MFT_EDUCATION_NEXUS_2026-09-04.zip",
+    "bytes": 8526465,
+    "sha256": "3fb025b05128e36fa25a5ae298a56cb7fd9d8bba91787b0003436a0069738b64",
+    "drive_file_id": "1j3DeGoRzmf1yGx1UWS1JxqvJHbED4MNw"
+  },
+  "retained_runtime": {
+    "source_repository": "evansmusitu/mft-education-nexus-a10-staging2",
+    "release_id": 383344860,
+    "asset_id": 546192327,
+    "file": "mft-phase1-native-runtime-root-v1.zip",
+    "bytes": 200225958,
+    "sha256": "03a5148acf8f7b7d07d116ec76980162280aacbd3a3acf997522d3b028237350"
+  },
+  "pins": {
+    "modal_python_sdk": "1.5.5",
+    "cloudflare_wrangler": "4.131.1",
+    "cloudflare_wrangler_action": "v4",
+    "pyinstaller_inside_frozen_build_contract": "6.22.2"
+  },
+  "separation": {
+    "axiom_dependency": false,
+    "axiom_repository_used": false,
+    "axiom_runner_used": false,
+    "axiom_credential_used": false,
+    "axiom_storage_used": false,
+    "authority_role": false,
+    "authority_modified": false,
+    "candidate_modified": false
+  },
+  "gates": {
+    "phase1_frontier": "112/114",
+    "official_phase2_credit": 0,
+    "phase2_started": false,
+    "official_phase3_credit": 0,
+    "phase3_started": false,
+    "real_phase5_exit_seal_created": false,
+    "approved_final_external_dependency_lock_created": false,
+    "thresholds_weakened": false
+  }
+}
