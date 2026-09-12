@@ -1,0 +1,50 @@
+name: MFT Nexus Cloudflare Edge Deploy V1
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'infrastructure/nexus-cloudflare-edge/**'
+      - '.github/workflows/mft-nexus-cloudflare-edge-deploy-v1.yml'
+
+permissions:
+  contents: read
+
+env:
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  NEXUS_EDGE_SHARED_SECRET: ${{ secrets.NEXUS_EDGE_SHARED_SECRET }}
+  GITHUB_DISPATCH_TOKEN: ${{ secrets.NEXUS_GITHUB_DISPATCH_TOKEN }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Fail closed unless Nexus Cloudflare credentials exist
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${CLOUDFLARE_API_TOKEN:-}" || { echo 'CLOUDFLARE_API_TOKEN is not configured'; exit 30; }
+          test -n "${CLOUDFLARE_ACCOUNT_ID:-}" || { echo 'CLOUDFLARE_ACCOUNT_ID is not configured'; exit 31; }
+          test -n "${NEXUS_EDGE_SHARED_SECRET:-}" || { echo 'NEXUS_EDGE_SHARED_SECRET is not configured'; exit 32; }
+          test -n "${GITHUB_DISPATCH_TOKEN:-}" || { echo 'NEXUS_GITHUB_DISPATCH_TOKEN is not configured'; exit 33; }
+
+      - name: Deploy Nexus Worker
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: infrastructure/nexus-cloudflare-edge
+          wranglerVersion: '4.131.1'
+          command: deploy
+          secrets: |
+            NEXUS_EDGE_SHARED_SECRET
+            GITHUB_DISPATCH_TOKEN
+        env:
+          NEXUS_EDGE_SHARED_SECRET: ${{ secrets.NEXUS_EDGE_SHARED_SECRET }}
+          GITHUB_DISPATCH_TOKEN: ${{ secrets.NEXUS_GITHUB_DISPATCH_TOKEN }}
