@@ -1,0 +1,12 @@
+{
+  "schema": "mft.education_nexus.infrastructure.executor_boundary.v1",
+  "scope": "EDUCATION_NEXUS_ONLY",
+  "architecture": ["cloudflare", "github", "modal"],
+  "phase1_frontier": "112/114",
+  "official_phase2_credit": 0,
+  "phase2_started": false,
+  "authority_role": false,
+  "authority_modified": false,
+  "candidate_modified": false,
+  "axiom_dependency": false
+}
