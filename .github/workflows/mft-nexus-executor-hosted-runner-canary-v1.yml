@@ -1,7 +1,6 @@
 name: MFT Nexus Executor Hosted Runner Canary V1
 
 on:
-  push:
   workflow_dispatch:
 
 permissions: {}
