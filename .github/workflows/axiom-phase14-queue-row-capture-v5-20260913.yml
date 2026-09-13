@@ -1,0 +1,168 @@
+name: Axiom Phase14 Queue Row Capture V5 20260913
+
+on:
+  push:
+    branches:
+      - tmp/axiom-phase14-pw161-diagnostic-20260913-1653
+    paths:
+      - .github/workflows/axiom-phase14-queue-row-capture-v5-20260913.yml
+
+permissions:
+  contents: write
+
+jobs:
+  capture:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12.14'
+
+      - name: Publish one-use X25519 key
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check 'cryptography==45.0.6'
+          KEY_PATH="ephemeral/axiom-phase14-queue-row-v5-${GITHUB_RUN_ID}-pubkey.txt"
+          HANDOFF_PATH="ephemeral/axiom-phase14-queue-row-v5-${GITHUB_RUN_ID}-handoff.json"
+          echo "$HANDOFF_PATH" >/tmp/p14v5-handoff-path
+          python - <<'PY'
+          import base64
+          from pathlib import Path
+          from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+          from cryptography.hazmat.primitives.serialization import Encoding,PrivateFormat,PublicFormat,NoEncryption
+          p=X25519PrivateKey.generate()
+          Path('/tmp/p14v5-private').write_bytes(p.private_bytes(Encoding.Raw,PrivateFormat.Raw,NoEncryption()))
+          Path('/tmp/p14v5-pub').write_text(base64.b64encode(p.public_key().public_bytes(Encoding.Raw,PublicFormat.Raw)).decode()+'\n')
+          PY
+          CONTENT=$(base64 -w0 /tmp/p14v5-pub)
+          BODY=$(jq -nc --arg message 'ephemeral: publish Axiom Phase14 queue row v5 key' --arg content "$CONTENT" --arg branch "$GITHUB_REF_NAME" '{message:$message,content:$content,branch:$branch}')
+          curl -fsS -X PUT -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' -d "$BODY" "https://api.github.com/repos/$GITHUB_REPOSITORY/contents/$KEY_PATH" >/dev/null
+          echo "AXIOM_P14_V5_KEY_PATH=$KEY_PATH"
+          echo "AXIOM_P14_V5_HANDOFF_PATH=$HANDOFF_PATH"
+
+      - name: Wait for encrypted mini payload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          HANDOFF_PATH=$(cat /tmp/p14v5-handoff-path)
+          API="https://api.github.com/repos/$GITHUB_REPOSITORY/contents/$HANDOFF_PATH?ref=$GITHUB_REF_NAME"
+          for i in $(seq 1 180); do
+            CODE=$(curl -sS -o /tmp/p14v5-api.json -w '%{http_code}' -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' "$API" || true)
+            if [ "$CODE" = 200 ]; then
+              jq -r '.content' /tmp/p14v5-api.json | tr -d '\n' | base64 -d >/tmp/p14v5-handoff.json
+              echo AXIOM_P14_V5_HANDOFF_RECEIVED
+              exit 0
+            fi
+            sleep 3
+          done
+          echo AXIOM_P14_V5_HANDOFF_TIMEOUT
+          exit 1
+
+      - name: Decrypt and verify exact minimized Phase14 interface
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import base64,json,hashlib
+          from pathlib import Path
+          from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey,X25519PublicKey
+          from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+          from cryptography.hazmat.primitives import hashes
+          from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+          h=json.loads(Path('/tmp/p14v5-handoff.json').read_text())
+          assert h['schema']=='musitu.axiom.phase14.queue-row-v5.encrypted-mini.v1'
+          priv=X25519PrivateKey.from_private_bytes(Path('/tmp/p14v5-private').read_bytes())
+          peer=X25519PublicKey.from_public_bytes(base64.b64decode(h['ephemeral_public_key_b64']))
+          key=HKDF(algorithm=hashes.SHA256(),length=32,salt=None,info=b'axiom-phase14-queue-row-v5').derive(priv.exchange(peer))
+          plain=AESGCM(key).decrypt(base64.b64decode(h['nonce_b64']),base64.b64decode(h['ciphertext_b64']),b'axiom-phase14-queue-row-v5')
+          assert len(plain)==274727, len(plain)
+          assert hashlib.sha256(plain).hexdigest()=='424baf2a74b8f4320fd298924451aac0cad50ffb25b5b204fb876e5fc9100ead'
+          Path('/tmp/p14v5.zip').write_bytes(plain)
+          PY
+          mkdir /tmp/p14v5
+          unzip -q /tmp/p14v5.zip -d /tmp/p14v5
+          cd /tmp/p14v5
+          test "$(sha256sum axiom_interface/tests/run_browser_phase14.py | awk '{print $1}')" = 1dd1974296cb9039a4e102f94c97ffaa50a54877c75539d7a4038e10aff2e981
+          test "$(sha256sum axiom_interface/pwa_queue.js | awk '{print $1}')" = 72aaeba5045fd0bc0c61c96928367b06d4ef74ca9c35d199b6bf1d50889c447f
+          test "$(sha256sum axiom_interface/pwa_runtime.js | awk '{print $1}')" = 5c9bc614f113d31d0b74ba8465ee245d19934651a9213d6440f56086d471ed59
+          test "$(sha256sum axiom_interface/pwa_bootstrap.js | awk '{print $1}')" = 794bf706fcf44b46ee04c9652c32d62dcab81cb541922fe4d51464b4c312bc98
+          test "$(sha256sum axiom_interface/index.html | awk '{print $1}')" = 4e52a11c4513533e210d2d6156e3564cb294226a4cf5f01292b3480488b0ace6
+          test "$(sha256sum axiom_interface/app.js | awk '{print $1}')" = 06a02cf7773a4f0261cf1b1525801514633cef7d71009b84cec2046cdd24297b
+          test "$(sha256sum axiom_interface/manifest.webmanifest | awk '{print $1}')" = 844a69e380f5166a9b1ddd299bab4b738650345a89fb378ed2c90e91ca2ab096
+          test "$(sha256sum axiom_interface/sw.js | awk '{print $1}')" = 8598a837fe0f1482955d66b2250c71f326bdec8ba53c845ac34aa17ea89b2f3c
+          echo AXIOM_PHASE14_QUEUE_ROW_V5_EXACT_MINI_INTERFACE_VERIFIED
+
+      - name: Install Playwright 1.61
+        run: |
+          python -m pip install --disable-pip-version-check 'playwright==1.61.0'
+          python -m playwright install --with-deps chromium
+          python - <<'PY'
+          from importlib.metadata import version
+          assert version('playwright')=='1.61.0'
+          print('AXIOM_PHASE14_QUEUE_ROW_V5_PLAYWRIGHT=1.61.0')
+          PY
+
+      - name: Build temporary queue-row instrumented original test
+        working-directory: /tmp/p14v5
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          src=Path('axiom_interface/tests/run_browser_phase14.py')
+          original=src.read_text()
+          needle='            completed = page.evaluate("()=>window.AxiomPwaHardening.queue.listActions()")\n            assert completed[0]["status"] == "COMPLETED_LOCAL"\n            receipts = page.evaluate("()=>window.AxiomPwaHardening.queue.listReceipts()")\n'
+          insert='            completed = page.evaluate("()=>window.AxiomPwaHardening.queue.listActions()")\n            import json as _p14json\n            print("AXIOM_P14_V5_ACTION="+_p14json.dumps(action,sort_keys=True),flush=True)\n            print("AXIOM_P14_V5_NAVIGATOR_ONLINE="+_p14json.dumps(page.evaluate("()=>navigator.onLine")),flush=True)\n            print("AXIOM_P14_V5_ACTION_ROWS="+_p14json.dumps(completed,sort_keys=True),flush=True)\n            _p14_receipts = page.evaluate("()=>window.AxiomPwaHardening.queue.listReceipts()")\n            print("AXIOM_P14_V5_RECEIPT_ROWS="+_p14json.dumps(_p14_receipts,sort_keys=True),flush=True)\n            try:\n                _p14_verify=page.evaluate("()=>window.AxiomPwaHardening.queue.verify()")\n                print("AXIOM_P14_V5_QUEUE_VERIFY="+_p14json.dumps(_p14_verify,sort_keys=True),flush=True)\n            except Exception as _p14_exc:\n                print("AXIOM_P14_V5_QUEUE_VERIFY_ERROR="+type(_p14_exc).__name__+":"+str(_p14_exc),flush=True)\n            _p14_match=[row for row in completed if row.get("action_id")==action.get("action_id")]\n            print("AXIOM_P14_V5_EXPLICIT_ACTION_MATCH="+_p14json.dumps(_p14_match,sort_keys=True),flush=True)\n            assert completed[0]["status"] == "COMPLETED_LOCAL"\n            receipts = page.evaluate("()=>window.AxiomPwaHardening.queue.listReceipts()")\n'
+          assert original.count(needle)==1, original.count(needle)
+          instrumented=original.replace(needle,insert,1)
+          Path('/tmp/run_browser_phase14_queue_rows_v5.py').write_text(instrumented)
+          assert src.read_text()==original
+          print('AXIOM_PHASE14_QUEUE_ROW_V5_ORIGINAL_SOURCE_UNCHANGED')
+          PY
+
+      - name: Run fresh exact-semantics attempts until queue evidence is captured
+        id: capture
+        working-directory: /tmp/p14v5
+        shell: bash
+        run: |
+          set +e
+          CAPTURED=0
+          PASSED=0
+          for n in 1 2 3 4 5; do
+            echo "AXIOM_P14_V5_ATTEMPT=$n"
+            rm -rf "/tmp/p14v5-artifacts-$n"
+            PYTHONPATH=. AXIOM_PHASE14_ARTIFACT_DIR="/tmp/p14v5-artifacts-$n" python /tmp/run_browser_phase14_queue_rows_v5.py >"/tmp/p14v5-attempt-$n.log" 2>&1
+            RC=$?
+            cat "/tmp/p14v5-attempt-$n.log"
+            if grep -q '^AXIOM_P14_V5_ACTION_ROWS=' "/tmp/p14v5-attempt-$n.log"; then
+              CAPTURED=1
+              echo "AXIOM_P14_V5_QUEUE_EVIDENCE_CAPTURED_ATTEMPT=$n"
+              if [ "$RC" -eq 0 ]; then PASSED=1; fi
+              break
+            fi
+            echo "AXIOM_P14_V5_ATTEMPT_RC=$RC"
+          done
+          echo "AXIOM_P14_V5_CAPTURED=$CAPTURED"
+          echo "AXIOM_P14_V5_ORIGINAL_ASSERTIONS_PASS=$PASSED"
+          if [ "$CAPTURED" -ne 1 ]; then
+            exit 2
+          fi
+
+      - name: Diagnostic authority boundary
+        if: always()
+        run: |
+          echo AXIOM_PHASE14_QUEUE_ROW_V5_AUTHORITY=DIAGNOSTIC_ONLY_NO_PROMOTION_AUTHORITY
+          echo AXIOM_PHASE14_QUEUE_ROW_V5_CANDIDATE=e88a14e12b68fffb95e2dff59493c2ef15e11d11
+          echo AXIOM_PHASE14_QUEUE_ROW_V5_TREE=1b77a4e79f4dcbc31efd12ebe093b1a076f5c51c
+          echo AXIOM_PHASE14_QUEUE_ROW_V5_REAL_DEVICE=NOT_RUN
+          echo AXIOM_PHASE14_QUEUE_ROW_V5_PHASE14_EARNED=false
+
+      - name: Cleanup
+        if: always()
+        run: rm -rf /tmp/p14v5* /tmp/run_browser_phase14_queue_rows_v5.py
