@@ -1,0 +1,283 @@
+name: MFT Nexus Axiom-Pattern Live Deploy
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/mft-nexus-axiom-pattern-live-deploy.yml'
+      - 'infrastructure/nexus-live-runtime/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mft-nexus-axiom-pattern-live-deploy
+  cancel-in-progress: false
+
+env:
+  CANONICAL_DRIVE_FILE_ID: 1j3DeGoRzmf1yGx1UWS1JxqvJHbED4MNw
+  CANONICAL_NAME: 01_FROZEN_CANONICAL_MFT_EDUCATION_NEXUS_2026-09-04.zip
+  CANONICAL_SHA256: 3fb025b05128e36fa25a5ae298a56cb7fd9d8bba91787b0003436a0069738b64
+  CANONICAL_BYTES: '8526465'
+  CANONICAL_APP_SHA256: fc661f10e51c499124bf1705ee162e8f23f55507feff6bb659e7b4f3af018f10
+  CANONICAL_REQUIREMENTS_SHA256: 6f07764247efd93d4682bf3372e63c5efd09e89603cbe11326f68c73247a7de3
+  MODAL_APP: mft-education-nexus-live
+  CLOUDFLARE_ACCOUNT_ID: 93f395f5121954671f92fffa453d6b61
+  CF_WORKER: mft-education-nexus-live-edge
+  PUBLIC_HOST: staging.mftintelligence.com
+  NEON_PROJECT: quiet-thunder-10380542
+  NEON_BRANCH: br-dry-paper-ay0ie7lf
+  NEON_ROLE: nexus_live_runtime
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      NEXUS_NEON_DATABASE_URL: ${{ secrets.NEXUS_NEON_DATABASE_URL }}
+      NEXUS_R2_ACCESS_KEY_ID: ${{ secrets.NEXUS_R2_ACCESS_KEY_ID }}
+      NEXUS_R2_SECRET_ACCESS_KEY: ${{ secrets.NEXUS_R2_SECRET_ACCESS_KEY }}
+      PAYNOW_INTEGRATION_KEY: ${{ secrets.PAYNOW_INTEGRATION_KEY }}
+      REVENUE_ADMIN_TOKEN: ${{ secrets.REVENUE_ADMIN_TOKEN }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Fail closed unless provider credentials exist
+        shell: bash
+        run: |
+          set -euo pipefail
+          for n in MODAL_TOKEN_ID MODAL_TOKEN_SECRET NEXUS_NEON_DATABASE_URL NEXUS_R2_ACCESS_KEY_ID NEXUS_R2_SECRET_ACCESS_KEY PAYNOW_INTEGRATION_KEY REVENUE_ADMIN_TOKEN CLOUDFLARE_API_TOKEN; do
+            test -n "${!n:-}" || { echo "$n is not configured" >&2; exit 20; }
+          done
+          test ${#REVENUE_ADMIN_TOKEN} -ge 32 || { echo 'REVENUE_ADMIN_TOKEN must be at least 32 characters' >&2; exit 21; }
+          case "$NEXUS_NEON_DATABASE_URL" in
+            postgresql://nexus_live_runtime:*|postgres://nexus_live_runtime:*) ;;
+            *) echo 'NEXUS_NEON_DATABASE_URL must use dedicated nexus_live_runtime role' >&2; exit 22;;
+          esac
+
+      - name: Install pinned deployment clients
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check --quiet 'gdown==5.2.0' 'modal==1.5.5'
+          npm install --no-save --ignore-scripts --no-audit --no-fund wrangler@4.131.1 >/dev/null
+          modal app list --json >/dev/null
+
+      - name: Acquire and bind exact canonical Nexus source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf runtime .runtime-extract .runtime-input
+          mkdir -p runtime .runtime-extract .runtime-input
+          gdown --fuzzy "https://drive.google.com/file/d/${CANONICAL_DRIVE_FILE_ID}/view?usp=drivesdk" -O ".runtime-input/${CANONICAL_NAME}"
+          python - <<'PY'
+          import hashlib,os,pathlib
+          p=pathlib.Path('.runtime-input')/os.environ['CANONICAL_NAME']
+          assert p.stat().st_size==int(os.environ['CANONICAL_BYTES'])
+          assert hashlib.sha256(p.read_bytes()).hexdigest()==os.environ['CANONICAL_SHA256']
+          PY
+          unzip -q ".runtime-input/${CANONICAL_NAME}" -d .runtime-extract
+          APP="$(find .runtime-extract -type f -path '*/mft_education_nexus/app.py' -print -quit)"
+          test -n "$APP"
+          ROOT="$(dirname "$(dirname "$APP")")"
+          test -f "$ROOT/requirements.lock"
+          cp -a "$ROOT/mft_education_nexus" runtime/
+          cp "$ROOT/requirements.lock" runtime/requirements.lock
+          test "$(sha256sum runtime/mft_education_nexus/app.py | awk '{print $1}')" = "$CANONICAL_APP_SHA256"
+          test "$(sha256sum runtime/requirements.lock | awk '{print $1}')" = "$CANONICAL_REQUIREMENTS_SHA256"
+
+      - name: Create or replace Modal runtime secret
+        shell: bash
+        run: |
+          set -euo pipefail
+          modal secret create --force mft-education-nexus-live-secrets \
+            "MFT_EDU_POSTGRES_DSN=$NEXUS_NEON_DATABASE_URL" \
+            "AWS_ACCESS_KEY_ID=$NEXUS_R2_ACCESS_KEY_ID" \
+            "AWS_SECRET_ACCESS_KEY=$NEXUS_R2_SECRET_ACCESS_KEY" \
+            "PAYNOW_INTEGRATION_KEY=$PAYNOW_INTEGRATION_KEY" \
+            "MFT_REVENUE_ADMIN_TOKEN=$REVENUE_ADMIN_TOKEN"
+
+      - name: Deploy private authenticated Nexus runtime to Modal
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp infrastructure/nexus-live-runtime/modal_live.py ./modal_live.py
+          modal deploy modal_live.py --name "$MODAL_APP" --strategy recreate --tag 'MFT-EDUCATION-NEXUS-CANONICAL-2026-09-04' | tee modal-deploy.log
+          python - <<'PY' > modal-url.txt
+          import modal
+          f=modal.Function.from_name('mft-education-nexus-live','nexus_api')
+          u=f.get_web_url()
+          if not u or not u.startswith('https://'): raise SystemExit('Modal web URL absent or non-HTTPS')
+          print(u)
+          PY
+          URL="$(cat modal-url.txt)"
+          code="$(curl -sS -o modal-unauth.txt -w '%{http_code}' "$URL/healthz" || true)"
+          test "$code" = 401 -o "$code" = 403
+
+      - name: Verify Modal runtime privately against Neon
+        shell: bash
+        run: |
+          set -euo pipefail
+          modal run modal_live.py::runtime_probe > modal-runtime-probe.log
+          grep -Fq 'MFT-EDUCATION-NEXUS-CANONICAL-2026-09-04' modal-runtime-probe.log
+          grep -Fq 'postgres' modal-runtime-probe.log
+          grep -Fq 'ready' modal-runtime-probe.log
+
+      - name: Inspect existing edge secret bindings
+        id: edge_bindings
+        shell: bash
+        run: |
+          set -euo pipefail
+          code="$(curl -sS -o edge-settings.json -w '%{http_code}' \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/${CF_WORKER}/settings" || true)"
+          if [ "$code" = 200 ]; then
+            python - <<'PY'
+          import json, os
+          x=json.load(open('edge-settings.json'))
+          names={b.get('name') for b in ((x.get('result') or {}).get('bindings') or []) if isinstance(b,dict)}
+          need={'MODAL_PROXY_KEY','MODAL_PROXY_SECRET'}
+          print('existing_modal_proxy_secrets='+str(need.issubset(names)).lower())
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:
+              f.write('reuse_proxy='+('true' if need.issubset(names) else 'false')+'\n')
+          PY
+          else
+            echo 'reuse_proxy=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create Modal proxy token for first edge binding
+        if: steps.edge_bindings.outputs.reuse_proxy != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          modal workspace proxy-tokens create --json > modal-proxy-token.json
+          python - <<'PY'
+          import json,pathlib
+          x=json.load(open('modal-proxy-token.json'))
+          vals=[]
+          def walk(v):
+              if isinstance(v,dict):
+                  for z in v.values(): walk(z)
+              elif isinstance(v,list):
+                  for z in v: walk(z)
+              elif isinstance(v,str): vals.append(v)
+          walk(x)
+          keys=[v for v in vals if v.startswith('wk-')]
+          secs=[v for v in vals if v.startswith('ws-')]
+          if len(keys)!=1 or len(secs)!=1: raise SystemExit('unexpected Modal proxy token response')
+          pathlib.Path('/tmp/modal-key').write_text(keys[0])
+          pathlib.Path('/tmp/modal-secret').write_text(secs[0])
+          PY
+
+      - name: Deploy Cloudflare adapter
+        shell: bash
+        run: |
+          set -euo pipefail
+          MODAL_URL="$(cat modal-url.txt | tr -d '\r\n')"
+          mkdir -p /tmp/nexus-edge
+          cp infrastructure/nexus-live-runtime/cloudflare_adapter.js /tmp/nexus-edge/worker.js
+          cat > /tmp/nexus-edge/wrangler.toml <<EOF
+          name = "${CF_WORKER}"
+          main = "worker.js"
+          compatibility_date = "2026-09-13"
+          workers_dev = false
+          routes = [{ pattern = "${PUBLIC_HOST}", custom_domain = true }]
+          [vars]
+          MODAL_BASE_URL = "${MODAL_URL}"
+          [observability]
+          enabled = true
+          EOF
+          (cd /tmp/nexus-edge && npx wrangler deploy --config wrangler.toml)
+          if [ "${{ steps.edge_bindings.outputs.reuse_proxy }}" != 'true' ]; then
+            printf '%s' "$(cat /tmp/modal-key)" | (cd /tmp/nexus-edge && npx wrangler secret put MODAL_PROXY_KEY --config wrangler.toml)
+            printf '%s' "$(cat /tmp/modal-secret)" | (cd /tmp/nexus-edge && npx wrangler secret put MODAL_PROXY_SECRET --config wrangler.toml)
+          fi
+
+      - name: Verify Cloudflare to Modal to Neon live path
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE="https://${PUBLIC_HOST}"
+          ready=0
+          for i in $(seq 1 40); do
+            hc="$(curl -sS --max-time 30 -D health.headers -o health.json -w '%{http_code}' "$BASE/healthz" || true)"
+            rc="$(curl -sS --max-time 30 -o ready.json -w '%{http_code}' "$BASE/readyz" || true)"
+            if [ "$hc" = 200 ] && [ "$rc" = 200 ]; then ready=1; break; fi
+            sleep 3
+          done
+          test "$ready" = 1
+          python - <<'PY'
+          import json
+          h=json.load(open('health.json')); r=json.load(open('ready.json'))
+          if h.get('status')!='ok' or h.get('product')!='MFT Education Nexus': raise SystemExit('health contract mismatch')
+          db=h.get('platform_db') or {}
+          if db.get('status') not in {'ready','ok'}: raise SystemExit('Neon-backed platform db is not ready')
+          if r.get('status')!='ready' or r.get('platform_db_ready') is not True: raise SystemExit('readiness contract mismatch')
+          PY
+          grep -iq '^x-mft-runtime: cloudflare-modal-neon' health.headers
+
+      - name: Verify Paynow revenue capability without creating a charge
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE="https://${PUBLIC_HOST}"
+          curl -fsS "$BASE/education-nexus/v12/revenue/capabilities" > revenue-capabilities.json
+          python - <<'PY'
+          import json
+          x=json.load(open('revenue-capabilities.json'))
+          if x.get('hosted_checkout')!='paynow': raise SystemExit('Paynow capability absent')
+          checks=x.get('configured') or {}
+          if checks.get('payment_provider') is not True: raise SystemExit('Paynow provider secret not active')
+          PY
+
+      - name: Seal deployment evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib,json,os,pathlib
+          e={
+            'schema':'mft.education_nexus.deployment.axiom_pattern_live.v1',
+            'source_zip_sha256':os.environ['CANONICAL_SHA256'],
+            'source_zip_bytes':int(os.environ['CANONICAL_BYTES']),
+            'github_control_plane':True,
+            'cloudflare_edge':os.environ['CF_WORKER'],
+            'public_host':os.environ['PUBLIC_HOST'],
+            'modal_app':os.environ['MODAL_APP'],
+            'modal_proxy_auth_required':True,
+            'neon_project':os.environ['NEON_PROJECT'],
+            'neon_branch':os.environ['NEON_BRANCH'],
+            'neon_role':os.environ['NEON_ROLE'],
+            'revenue_provider':'paynow',
+            'production_activation':False,
+            'release_mode':'PAID_EARLY_ACCESS',
+            'axiom_dependency':False,
+            'axiom_modified':False,
+            'deployment_gate':'PASS'
+          }
+          p=pathlib.Path('nexus-axiom-pattern-live-deploy.json')
+          p.write_text(json.dumps(e,indent=2,sort_keys=True)+'\n')
+          pathlib.Path('nexus-axiom-pattern-live-deploy.sha256').write_text(hashlib.sha256(p.read_bytes()).hexdigest()+'  '+p.name+'\n')
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mft-nexus-axiom-pattern-live-deploy-${{ github.run_id }}
+          path: |
+            nexus-axiom-pattern-live-deploy.json
+            nexus-axiom-pattern-live-deploy.sha256
+            health.json
+            ready.json
+            revenue-capabilities.json
+            modal-runtime-probe.log
+          retention-days: 30
+          if-no-files-found: error
