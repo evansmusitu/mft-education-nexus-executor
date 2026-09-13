@@ -1,0 +1,197 @@
+name: Axiom Phase13 Phase14 Encrypted Candidate Measurement
+on:
+  push:
+    branches:
+      - tmp/axiom-phase13-14-candidate-measurement-20260913-1608
+    paths:
+      - .github/workflows/axiom-phase13-14-encrypted-candidate-measurement.yml
+permissions:
+  contents: write
+jobs:
+  measure:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - name: Setup patch-pinned Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12.14'
+      - name: Prepare one-use X25519 transport key
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check 'cryptography==45.0.6'
+          python - <<'PY'
+          import base64
+          from pathlib import Path
+          from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+          from cryptography.hazmat.primitives.serialization import Encoding, PrivateFormat, PublicFormat, NoEncryption
+          priv=X25519PrivateKey.generate()
+          Path('/tmp/axiom-candidate-x25519-private.bin').write_bytes(priv.private_bytes(Encoding.Raw,PrivateFormat.Raw,NoEncryption()))
+          pub=priv.public_key().public_bytes(Encoding.Raw,PublicFormat.Raw)
+          Path('/tmp/axiom-candidate-pubkey.txt').write_text(base64.b64encode(pub).decode()+'\n', encoding='utf-8')
+          PY
+          CONTENT=$(base64 -w0 /tmp/axiom-candidate-pubkey.txt)
+          BODY=$(jq -nc --arg message 'ephemeral: publish one-use Axiom Phase13/14 candidate transport key' --arg content "$CONTENT" --arg branch "$GITHUB_REF_NAME" '{message:$message,content:$content,branch:$branch}')
+          curl -fsS -X PUT -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' -d "$BODY" "https://api.github.com/repos/$GITHUB_REPOSITORY/contents/ephemeral/axiom-phase13-14-candidate-pubkey.txt" >/tmp/pubkey-publish.json
+          echo 'AXIOM_PHASE13_14_EPHEMERAL_PUBKEY_PUBLISHED'
+      - name: Wait for encrypted candidate handoff
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          API="https://api.github.com/repos/$GITHUB_REPOSITORY/contents/ephemeral/axiom-phase13-14-candidate-handoff.json?ref=$GITHUB_REF_NAME"
+          for i in $(seq 1 240); do
+            CODE=$(curl -sS -o /tmp/handoff-api.json -w '%{http_code}' -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "$API" || true)
+            if [ "$CODE" = 200 ]; then
+              jq -r '.content' /tmp/handoff-api.json | tr -d '\n' | base64 -d >/tmp/axiom-candidate-handoff.json
+              echo 'AXIOM_PHASE13_14_ENCRYPTED_HANDOFF_RECEIVED'
+              exit 0
+            fi
+            sleep 5
+          done
+          echo 'candidate encrypted handoff timeout' >&2
+          exit 1
+      - name: Decrypt handoff and fetch ciphertext
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import base64, json
+          from pathlib import Path
+          from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
+          from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+          from cryptography.hazmat.primitives import hashes
+          from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+          h=json.loads(Path('/tmp/axiom-candidate-handoff.json').read_text())
+          priv=X25519PrivateKey.from_private_bytes(Path('/tmp/axiom-candidate-x25519-private.bin').read_bytes())
+          peer=X25519PublicKey.from_public_bytes(base64.b64decode(h['ephemeral_public_key_b64']))
+          shared=priv.exchange(peer)
+          key=HKDF(algorithm=hashes.SHA256(),length=32,salt=None,info=b'axiom-phase13-14-candidate-dropbox-handoff-v1').derive(shared)
+          payload=AESGCM(key).decrypt(base64.b64decode(h['nonce_b64']),base64.b64decode(h['ciphertext_b64']),b'axiom-phase13-14-candidate-handoff')
+          Path('/tmp/axiom-candidate-download.json').write_bytes(payload)
+          PY
+          URL=$(jq -r '.download_url' /tmp/axiom-candidate-download.json)
+          curl --fail --silent --show-error --location --retry 2 "$URL" --output /tmp/axiom-candidate-transport.enc
+          EXPECTED=$(jq -r '.encrypted_sha256' /tmp/axiom-candidate-download.json)
+          ACTUAL=$(sha256sum /tmp/axiom-candidate-transport.enc | awk '{print $1}')
+          test "$ACTUAL" = "$EXPECTED"
+          echo "AXIOM_PHASE13_14_ENCRYPTED_TRANSPORT_SHA256=$ACTUAL"
+      - name: Decrypt and verify authoritative WIP bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import base64, json, hashlib
+          from pathlib import Path
+          from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+          meta=json.loads(Path('/tmp/axiom-candidate-download.json').read_text())
+          raw=Path('/tmp/axiom-candidate-transport.enc').read_bytes()
+          if raw[:10] != b'AXIOMCAND1': raise SystemExit('bad candidate transport magic')
+          nonce=raw[10:22]; ct=raw[22:]
+          key=base64.b64decode(meta['payload_key_b64'])
+          plain=AESGCM(key).decrypt(nonce,ct,b'MUSITU_AXIOM_PHASE13_PHASE14_CANDIDATE_TRANSPORT')
+          if hashlib.sha256(plain).hexdigest()!=meta['plaintext_sha256']: raise SystemExit('candidate plaintext hash mismatch')
+          Path('/tmp/axiom-candidate-transport.tar.gz').write_bytes(plain)
+          PY
+          rm -rf /tmp/axiom-candidate-payload /tmp/axiom-candidate-repo /tmp/axiom-candidate-bundle-verify
+          mkdir -p /tmp/axiom-candidate-payload
+          tar -xzf /tmp/axiom-candidate-transport.tar.gz -C /tmp/axiom-candidate-payload
+          cd /tmp/axiom-candidate-payload
+          BUNDLE=MUSITU_AXIOM_FRONTIER_V5_PHASE13_PHASE14_WIP_CONTINUATION_20260913.bundle.bin
+          test "$(stat -c %s "$BUNDLE")" = 7888037
+          test "$(sha256sum "$BUNDLE" | awk '{print $1}')" = 6ec5632f9abc86d2a61cdcae745335cfe8c603e36325e15b8ddaff533dccf72d
+          python - <<'PY'
+          import json
+          d=json.load(open('CANDIDATE_AUTHORITY.json'))
+          assert d['authority_effect']=='MEASUREMENT_ONLY_CANDIDATE_EVIDENCE'
+          assert d['phase13_commit']=='39c9ccff3ebce30c44f38b6262bc1489196f2d13'
+          assert d['phase14_commit']=='e88a14e12b68fffb95e2dff59493c2ef15e11d11'
+          assert d['phase12_candidate_base_tree']=='510e24525fae4707eaad1c6e6004b7ce03888645'
+          assert d['canonical_phase12_tree']=='510e24525fae4707eaad1c6e6004b7ce03888645'
+          PY
+          mkdir -p /tmp/axiom-candidate-bundle-verify && cd /tmp/axiom-candidate-bundle-verify && git init -q
+          git bundle verify /tmp/axiom-candidate-payload/$BUNDLE
+          git init -q /tmp/axiom-candidate-repo
+          cd /tmp/axiom-candidate-repo
+          git fetch -q /tmp/axiom-candidate-payload/$BUNDLE 'refs/heads/wip/axiom-v5-interface-phase14-pwa-native-20260913:refs/heads/wip-source'
+          test "$(git rev-parse wip-source)" = e88a14e12b68fffb95e2dff59493c2ef15e11d11
+          test "$(git rev-parse e88a14e12b68fffb95e2dff59493c2ef15e11d11^{tree})" = 1b77a4e79f4dcbc31efd12ebe093b1a076f5c51c
+          test "$(git rev-parse 39c9ccff3ebce30c44f38b6262bc1489196f2d13^{tree})" = b431092d61d455e0ff71656d7894cc900f4d9ea2
+          test "$(git rev-parse aa3100aeb6c904bdf78b60194c76ebf2ea3ffb89^{tree})" = 510e24525fae4707eaad1c6e6004b7ce03888645
+          echo 'MUSITU_AXIOM_PHASE13_14_WIP_BUNDLE_EXACT_VERIFY_PASS'
+      - name: Install locked browser semantic stack
+        shell: bash
+        working-directory: /tmp/axiom-candidate-repo
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ffmpeg espeak-ng tesseract-ocr xvfb xdotool python3-tk scrot unzip ca-certificates curl
+          python -m pip install 'pip==26.2.1'
+          git checkout -q e88a14e12b68fffb95e2dff59493c2ef15e11d11
+          python -m pip install -r frontier_v5/requirements/fullstack.lock.txt
+          python -m pip check
+          python -m playwright install --with-deps chromium
+          PYTHONPATH=. python frontier_v5/scripts/verify_supply_chain.py --output /tmp/musitu-interface-supply-chain.json
+          model_zip=/tmp/vosk-model-small-en-us-0.15.zip; model_root=/tmp/axiom-vosk; rm -rf "$model_root" "$model_zip"; mkdir -p "$model_root"
+          curl --fail --silent --show-error --location --retry 3 --retry-all-errors https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip --output "$model_zip"
+          echo '30f26242c4eb449f948e42cb302dd7a686cb29a3423a8367f99ff41780942498  /tmp/vosk-model-small-en-us-0.15.zip' | sha256sum --check --strict
+          unzip -q "$model_zip" -d "$model_root"
+          test -d "$model_root/vosk-model-small-en-us-0.15/am"
+      - name: Run exact Phase 13 candidate full inherited envelope
+        shell: bash
+        working-directory: /tmp/axiom-candidate-repo
+        env:
+          AXIOM_VOSK_MODEL_DIR: /tmp/axiom-vosk/vosk-model-small-en-us-0.15
+          AXIOM_VOSK_MODEL_SHA256: 30f26242c4eb449f948e42cb302dd7a686cb29a3423a8367f99ff41780942498
+          AXIOM_PHASE8_SECURITY_ARTIFACT_DIR: /tmp/axiom-interface-phase8-security-p13
+          AXIOM_PHASE9_SECURITY_ARTIFACT_DIR: /tmp/axiom-interface-phase9-security-p13
+          AXIOM_PHASE10_SECURITY_ARTIFACT_DIR: /tmp/axiom-interface-phase10-security-p13
+          AXIOM_PHASE11_SECURITY_ARTIFACT_DIR: /tmp/axiom-interface-phase11-security-p13
+          AXIOM_PHASE12_SECURITY_ARTIFACT_DIR: /tmp/axiom-interface-phase12-security-p13
+          AXIOM_PHASE13_SECURITY_ARTIFACT_DIR: /tmp/axiom-interface-phase13-security
+        run: |
+          set -euo pipefail
+          git checkout -q 39c9ccff3ebce30c44f38b6262bc1489196f2d13
+          test "$(git rev-parse HEAD)" = 39c9ccff3ebce30c44f38b6262bc1489196f2d13
+          test "$(git rev-parse HEAD^{tree})" = b431092d61d455e0ff71656d7894cc900f4d9ea2
+          PYTHONPATH=. python frontier_v5/scripts/run_phase13_regression_gate.py
+          PYTHONPATH=. python frontier_v5/scripts/run_phase13_browser_regression_gate.py
+          echo 'MUSITU_AXIOM_PHASE13_EXTERNAL_EXACT_CANDIDATE_ENVELOPE_PASS_AWAITING_INDEPENDENT_REVIEW'
+          sha256sum /tmp/axiom-interface-phase13-security/phase13-security-evidence.json
+          sha256sum /tmp/axiom-interface-phase13/phase13-evidence-browser-evidence.json
+          find /tmp/axiom-interface-phase13 -type f -name '*.png' -print0 | sort -z | xargs -0 sha256sum
+      - name: Run exact Phase 14 candidate full inherited envelope
+        shell: bash
+        working-directory: /tmp/axiom-candidate-repo
+        env:
+          AXIOM_VOSK_MODEL_DIR: /tmp/axiom-vosk/vosk-model-small-en-us-0.15
+          AXIOM_VOSK_MODEL_SHA256: 30f26242c4eb449f948e42cb302dd7a686cb29a3423a8367f99ff41780942498
+          AXIOM_PHASE8_SECURITY_ARTIFACT_DIR: /tmp/axiom-interface-phase8-security-p14
+          AXIOM_PHASE9_SECURITY_ARTIFACT_DIR: /tmp/axiom-interface-phase9-security-p14
+          AXIOM_PHASE10_SECURITY_ARTIFACT_DIR: /tmp/axiom-interface-phase10-security-p14
+          AXIOM_PHASE11_SECURITY_ARTIFACT_DIR: /tmp/axiom-interface-phase11-security-p14
+          AXIOM_PHASE12_SECURITY_ARTIFACT_DIR: /tmp/axiom-interface-phase12-security-p14
+          AXIOM_PHASE13_SECURITY_ARTIFACT_DIR: /tmp/axiom-interface-phase13-security-p14
+          AXIOM_PHASE14_SECURITY_ARTIFACT_DIR: /tmp/axiom-interface-phase14-security
+        run: |
+          set -euo pipefail
+          git checkout -q e88a14e12b68fffb95e2dff59493c2ef15e11d11
+          test "$(git rev-parse HEAD)" = e88a14e12b68fffb95e2dff59493c2ef15e11d11
+          test "$(git rev-parse HEAD^{tree})" = 1b77a4e79f4dcbc31efd12ebe093b1a076f5c51c
+          PYTHONPATH=. python frontier_v5/scripts/run_phase14_regression_gate.py
+          PYTHONPATH=. python frontier_v5/scripts/run_phase14_browser_regression_gate.py
+          echo 'MUSITU_AXIOM_PHASE14_EXTERNAL_EXACT_CANDIDATE_ENVELOPE_PASS_REAL_DEVICE_REQUIRED'
+          sha256sum /tmp/axiom-interface-phase14-security/phase14-security-evidence.json
+          sha256sum /tmp/axiom-interface-phase14/phase14-pwa-browser-evidence.json
+          find /tmp/axiom-interface-phase14 -type f -name '*.png' -print0 | sort -z | xargs -0 sha256sum
+          sha256sum /tmp/musitu-interface-supply-chain.json
+      - name: Destroy candidate plaintext and keys
+        if: always()
+        shell: bash
+        run: |
+          rm -rf /tmp/axiom-candidate-repo /tmp/axiom-candidate-payload /tmp/axiom-candidate-bundle-verify /tmp/axiom-candidate-transport.tar.gz /tmp/axiom-candidate-transport.enc /tmp/axiom-candidate-download.json /tmp/axiom-candidate-handoff.json /tmp/axiom-candidate-x25519-private.bin /tmp/axiom-candidate-pubkey.txt /tmp/axiom-vosk
+          echo 'AXIOM_PHASE13_14_EPHEMERAL_PLAINTEXT_DESTROYED'
