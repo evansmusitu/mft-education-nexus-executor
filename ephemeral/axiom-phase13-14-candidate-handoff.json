@@ -1,0 +1,7 @@
+{
+  "ciphertext_b64": "+5+EWqrqsSf7Lkfr2ARXUiGX9ADzOEjZtbxso3V95vVkEsnuD/6NrUUcF4dWmLq8m5cgeUNFPQzjT+MjwVeGC7/8YdzXjnszFFEfZVnwU+nY9I1NMDB8U+wHCAWodr296r8Q01PziqeKfGdqP45N/q/7DPu4q3z41GZlWmahiMoC/2S8o8LOTa1ikiHuhyA6ciJNfci1JNZZX8f/iPiLw64iHx+nc4FqAdceM8gA1d/U2VCrhn/2m55uZXXqP6QnANW1paSYfPfGkY0QpXQEqElSBqGXSoOrttnpBzUp5Vq2nrwXtOFhnle+PWNfl3sQm73I5cWc8xDPTwfFEs5YRyWHBxf3B8kC++6ZKDQyLfsEPUqGzAp8Lb1FhG9Q7WGdoj19AyW9apYAoNohkuN2Rmogsp6w93qc6H34u5NgbAnPbBQA0Xg4u9iizbGur8iZ1MLgyn/WdSVbqRR+uaFy9pqGOoJz8oI9NNEdzX+gIgaRxmldPJ3VmOtAdaaaGTvPLUr36UybT1a7PQPjYg3uxDBTR9YXKkBJvq8vjgdN1LSgtNTLCR7FhSI3+JTuejlruv62Hz3JOPLpB6+xdBfodkXxu2sWJ46cELr11Pn41NFpsZQz1ChmuA+eSA9+B+NCvVo0F/KA2U5r6sH7uPPQQYaGpNzy7DQZIl0H2P7byHnr1hBHBa96c1NSSuq4zgEfMFQgEDrH5rAeorc=",
+  "ephemeral_public_key_b64": "RfFnR4jc7TNDg6M+36OnMp5SMzMT7Kzf3+hv+dkJ/RI=",
+  "nonce_b64": "YPeczFc7SPX7ybnj",
+  "run_id": 34761812813,
+  "schema": "musitu.axiom.phase13-14.candidate-encrypted-handoff.v1"
+}
