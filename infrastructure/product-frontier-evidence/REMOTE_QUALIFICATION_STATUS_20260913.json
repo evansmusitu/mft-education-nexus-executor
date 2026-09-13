@@ -1,0 +1,43 @@
+{
+  "schema": "mft.product_frontier.remote_qualification_status.v1",
+  "recorded_date": "2026-09-13",
+  "promotion_state": "PARITY_CANDIDATE",
+  "promotion_effect": "NONE",
+  "parent_overlay_sha256": "32e83dabc02b99c5441d91edb4bd6fdc8e86d2c6bb4ab270dac40d55979b1e1a",
+  "runtime_source_sha256": "29d149a7789375003e0e86499a4ee0f4f3995d16678176a2735f2f1c208e1c53",
+  "branch": "product-frontier-runtime-20260913",
+  "topology": "GitHub pinned control/evidence -> Modal single-container persistent SQLite runtime -> Cloudflare stateless HTTPS edge",
+  "local_stateful_shape": {
+    "status": "PASS",
+    "checks": "15/15",
+    "classification": "LOCAL_SHAPE_EVIDENCE_NOT_MODAL_NOT_CLOUDFLARE"
+  },
+  "github_runs": [
+    {
+      "run_id": 34742195302,
+      "head_sha": "b4531a9f5bec85f5c619d36af7f7f380ffdb2d66",
+      "job_id": 103683659895,
+      "conclusion": "failure",
+      "steps": 0,
+      "logs_available": false,
+      "classification": "GITHUB_HOSTED_RUNNER_UNAVAILABLE_BEFORE_PROVIDER_EXECUTION"
+    },
+    {
+      "run_id": 34742454397,
+      "head_sha": "c989f2be26d5e16d5abc4a14c90688fb46a10fa2",
+      "job_id": 103684346383,
+      "conclusion": "failure",
+      "steps": 0,
+      "logs_available": false,
+      "classification": "GITHUB_HOSTED_RUNNER_UNAVAILABLE_BEFORE_PROVIDER_EXECUTION"
+    }
+  ],
+  "provider_execution": {
+    "modal_deploy_attempted": false,
+    "modal_origin_health_observed": false,
+    "cloudflare_deploy_attempted": false,
+    "cloudflare_edge_health_observed": false
+  },
+  "current_blocker": "The private GitHub executor accepts the workflow but GitHub does not assign a hosted runner; jobs terminate before any step. Provider credentials remain protected in GitHub secrets and were not exposed or copied.",
+  "next_admissible_execution": "Run the same pinned workflow when a GitHub executor is assigned, or authorize Modal and Cloudflare directly in a trusted execution environment. Do not substitute an ephemeral SQLite host or a generated mirror."
+}
