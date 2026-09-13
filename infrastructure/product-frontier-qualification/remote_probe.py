@@ -42,7 +42,7 @@ def request(method: str, path: str, *, token: str | None = None, payload=None, e
 
 
 def login(username: str) -> str:
-    status, body = request('POST', '/v2/auth/login', payload={
+    _, body = request('POST', '/v2/auth/login', payload={
         'institution_id': INSTITUTION,
         'username': username,
         'password': PASSWORD,
@@ -101,7 +101,8 @@ def phase_pre(state_path: Path, evidence_path: Path) -> None:
     checks.append(('high_risk_self_approval_blocked', status == 409))
     _, approved = request('POST', f'/v2/decisions/{proposal_id}/approve', token=head2,
                           payload={'proposal_digest': digest}, expected=200)
-    checks.append(('independent_approval', approved.get('status') == 'APPROVED'))
+    checks.append(('independent_approval',
+                   approved.get('approver') == 'qa-head-2' and approved.get('proposal_digest') == digest))
 
     idem = 'remote-qualification-' + uuid.uuid4().hex
     _, executed = request('POST', f'/v2/decisions/{proposal_id}/execute', token=head,
