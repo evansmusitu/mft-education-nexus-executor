@@ -118,7 +118,7 @@ jobs:
           profile: pixel_6
           disable-animations: true
           script: |
-            set -euo pipefail
+            set -eu
             adb install -r "$APK" | tee emulator_install.txt
             adb logcat -c
             adb shell monkey -p "$PACKAGE_ID" -c android.intent.category.LAUNCHER 1 | tee emulator_monkey.txt
