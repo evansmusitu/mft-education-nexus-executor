@@ -1,4 +1,4 @@
-name: Axiom Phase14 Playwright 1.61 Encrypted Diagnostic 20260913
+name: Axiom Phase14 Queue Instrumentation 20260913
 
 on:
   push:
@@ -11,16 +11,16 @@ permissions:
   contents: write
 
 jobs:
-  phase14-pw161-diagnostic:
+  phase14-queue-instrumentation:
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 45
     steps:
       - name: Setup patch-pinned Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: '3.12.14'
 
-      - name: Prepare one-use X25519 diagnostic transport key
+      - name: Prepare one-use X25519 instrumentation key
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -33,34 +33,34 @@ jobs:
           from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
           from cryptography.hazmat.primitives.serialization import Encoding, PrivateFormat, PublicFormat, NoEncryption
           priv = X25519PrivateKey.generate()
-          Path('/tmp/axiom-p14pw161-private.bin').write_bytes(priv.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption()))
-          Path('/tmp/axiom-p14pw161-pubkey.txt').write_text(base64.b64encode(priv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)).decode() + '\n')
+          Path('/tmp/axiom-p14inst-private.bin').write_bytes(priv.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption()))
+          Path('/tmp/axiom-p14inst-pubkey.txt').write_text(base64.b64encode(priv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)).decode() + '\n')
           PY
-          CONTENT=$(base64 -w0 /tmp/axiom-p14pw161-pubkey.txt)
-          BODY=$(jq -nc --arg message 'ephemeral: publish one-use Axiom Phase14 pw161 diagnostic key' --arg content "$CONTENT" --arg branch "$GITHUB_REF_NAME" '{message:$message,content:$content,branch:$branch}')
-          curl -fsS -X PUT -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' -d "$BODY" "https://api.github.com/repos/$GITHUB_REPOSITORY/contents/ephemeral/axiom-phase14-pw161-pubkey.txt" >/dev/null
-          echo 'AXIOM_PHASE14_PW161_EPHEMERAL_PUBKEY_PUBLISHED'
+          CONTENT=$(base64 -w0 /tmp/axiom-p14inst-pubkey.txt)
+          BODY=$(jq -nc --arg message 'ephemeral: publish one-use Axiom Phase14 instrumentation key' --arg content "$CONTENT" --arg branch "$GITHUB_REF_NAME" '{message:$message,content:$content,branch:$branch}')
+          curl -fsS -X PUT -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' -d "$BODY" "https://api.github.com/repos/$GITHUB_REPOSITORY/contents/ephemeral/axiom-phase14-pw161-instrument-pubkey.txt" >/dev/null
+          echo 'AXIOM_PHASE14_INSTRUMENT_EPHEMERAL_PUBKEY_PUBLISHED'
 
-      - name: Wait for encrypted diagnostic handoff
+      - name: Wait for encrypted instrumentation handoff
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          API="https://api.github.com/repos/$GITHUB_REPOSITORY/contents/ephemeral/axiom-phase14-pw161-handoff.json?ref=$GITHUB_REF_NAME"
-          for i in $(seq 1 240); do
-            CODE=$(curl -sS -o /tmp/p14pw161-api.json -w '%{http_code}' -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "$API" || true)
+          API="https://api.github.com/repos/$GITHUB_REPOSITORY/contents/ephemeral/axiom-phase14-pw161-instrument-handoff.json?ref=$GITHUB_REF_NAME"
+          for i in $(seq 1 180); do
+            CODE=$(curl -sS -o /tmp/p14inst-api.json -w '%{http_code}' -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "$API" || true)
             if [ "$CODE" = 200 ]; then
-              jq -r '.content' /tmp/p14pw161-api.json | tr -d '\n' | base64 -d >/tmp/p14pw161-handoff.json
-              echo 'AXIOM_PHASE14_PW161_HANDOFF_RECEIVED'
+              jq -r '.content' /tmp/p14inst-api.json | tr -d '\n' | base64 -d >/tmp/p14inst-handoff.json
+              echo 'AXIOM_PHASE14_INSTRUMENT_HANDOFF_RECEIVED'
               exit 0
             fi
-            sleep 5
+            sleep 3
           done
-          echo 'AXIOM_PHASE14_PW161_HANDOFF_TIMEOUT'
+          echo 'AXIOM_PHASE14_INSTRUMENT_HANDOFF_TIMEOUT'
           exit 1
 
-      - name: Decrypt handoff and verify exact candidate payload
+      - name: Decrypt handoff and verify exact candidate
         shell: bash
         run: |
           set -euo pipefail
@@ -71,102 +71,97 @@ jobs:
           from cryptography.hazmat.primitives.kdf.hkdf import HKDF
           from cryptography.hazmat.primitives import hashes
           from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-          h = json.loads(Path('/tmp/p14pw161-handoff.json').read_text())
-          priv = X25519PrivateKey.from_private_bytes(Path('/tmp/axiom-p14pw161-private.bin').read_bytes())
+          h = json.loads(Path('/tmp/p14inst-handoff.json').read_text())
+          priv = X25519PrivateKey.from_private_bytes(Path('/tmp/axiom-p14inst-private.bin').read_bytes())
           peer = X25519PublicKey.from_public_bytes(base64.b64decode(h['ephemeral_public_key_b64']))
-          key = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=b'axiom-phase14-pw161-diagnostic-dropbox-handoff-v1').derive(priv.exchange(peer))
-          plain = AESGCM(key).decrypt(base64.b64decode(h['nonce_b64']), base64.b64decode(h['ciphertext_b64']), b'axiom-phase14-pw161-diagnostic-handoff')
-          Path('/tmp/p14pw161-download.json').write_bytes(plain)
+          key = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=b'axiom-phase14-pw161-instrument-handoff-v1').derive(priv.exchange(peer))
+          plain = AESGCM(key).decrypt(base64.b64decode(h['nonce_b64']), base64.b64decode(h['ciphertext_b64']), b'axiom-phase14-pw161-instrument-handoff')
+          Path('/tmp/p14inst-download.json').write_bytes(plain)
           PY
-          URL=$(jq -r '.download_url' /tmp/p14pw161-download.json)
-          curl --fail --silent --show-error --location "$URL" -o /tmp/p14pw161-transport.enc
-          test "$(sha256sum /tmp/p14pw161-transport.enc | awk '{print $1}')" = "$(jq -r '.encrypted_sha256' /tmp/p14pw161-download.json)"
+          URL=$(jq -r '.download_url' /tmp/p14inst-download.json)
+          curl --fail --silent --show-error --location "$URL" -o /tmp/p14inst-transport.enc
+          test "$(stat -c%s /tmp/p14inst-transport.enc)" = 7818986
+          test "$(sha256sum /tmp/p14inst-transport.enc | awk '{print $1}')" = da585ec63b9aa5733300934964d6a272351fb7a256c3dffd08cc410da92784b8
           python - <<'PY'
           import base64, json, hashlib
           from pathlib import Path
           from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-          m = json.loads(Path('/tmp/p14pw161-download.json').read_text())
-          raw = Path('/tmp/p14pw161-transport.enc').read_bytes()
+          m = json.loads(Path('/tmp/p14inst-download.json').read_text())
+          raw = Path('/tmp/p14inst-transport.enc').read_bytes()
           assert raw[:10] == b'AXIOMCAND1'
           plain = AESGCM(base64.b64decode(m['payload_key_b64'])).decrypt(raw[10:22], raw[22:], b'MUSITU_AXIOM_PHASE13_PHASE14_CANDIDATE_TRANSPORT')
-          assert hashlib.sha256(plain).hexdigest() == m['plaintext_sha256']
-          Path('/tmp/p14pw161.tar.gz').write_bytes(plain)
+          assert len(plain) == 7818948
+          assert hashlib.sha256(plain).hexdigest() == 'fe9bdcc50c2dba41e927424180349f077e56ba92e20462d2ab38511ea53b76f1'
+          Path('/tmp/p14inst.tar.gz').write_bytes(plain)
           PY
-          mkdir -p /tmp/p14pw161-payload && tar -xzf /tmp/p14pw161.tar.gz -C /tmp/p14pw161-payload
-          B=/tmp/p14pw161-payload/MUSITU_AXIOM_FRONTIER_V5_PHASE13_PHASE14_WIP_CONTINUATION_20260913.bundle.bin
+          mkdir -p /tmp/p14inst-payload && tar -xzf /tmp/p14inst.tar.gz -C /tmp/p14inst-payload
+          B=/tmp/p14inst-payload/MUSITU_AXIOM_FRONTIER_V5_PHASE13_PHASE14_WIP_CONTINUATION_20260913.bundle.bin
           test "$(stat -c%s "$B")" = 7888037
           test "$(sha256sum "$B" | awk '{print $1}')" = 6ec5632f9abc86d2a61cdcae745335cfe8c603e36325e15b8ddaff533dccf72d
-          git init -q /tmp/p14pw161-repo
-          cd /tmp/p14pw161-repo
+          git init -q /tmp/p14inst-repo
+          cd /tmp/p14inst-repo
           git fetch -q "$B" 'refs/heads/wip/axiom-v5-interface-phase14-pwa-native-20260913:refs/heads/wip-source'
           git checkout -q e88a14e12b68fffb95e2dff59493c2ef15e11d11
           test "$(git rev-parse HEAD^{tree})" = 1b77a4e79f4dcbc31efd12ebe093b1a076f5c51c
           test "$(sha256sum axiom_interface/tests/run_browser_phase14.py | awk '{print $1}')" = 1dd1974296cb9039a4e102f94c97ffaa50a54877c75539d7a4038e10aff2e981
-          echo 'AXIOM_PHASE14_PW161_EXACT_CANDIDATE_AND_TEST_VERIFIED'
+          echo 'AXIOM_PHASE14_INSTRUMENT_EXACT_CANDIDATE_VERIFIED'
 
-      - name: Install locked stack then substitute only Playwright 1.61.0
+      - name: Install browser stack with Playwright 1.61.0
         shell: bash
-        working-directory: /tmp/p14pw161-repo
+        working-directory: /tmp/p14inst-repo
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends ffmpeg espeak-ng tesseract-ocr xvfb xdotool python3-tk scrot unzip ca-certificates curl
-          python -m pip install 'pip==26.2.1'
-          python -m pip install -r frontier_v5/requirements/fullstack.lock.txt
-          python -m pip check
-          PYTHONPATH=. python frontier_v5/scripts/verify_supply_chain.py --output /tmp/p14pw161-supply-chain-locked.json
+          python -m pip install --disable-pip-version-check 'playwright==1.61.0'
           python -m playwright install --with-deps chromium
-          python -m pip install --force-reinstall --disable-pip-version-check 'playwright==1.61.0'
-          python -m pip check
-          python -m playwright install chromium
           python - <<'PY'
           from importlib.metadata import version
-          assert version('playwright') == '1.61.0', version('playwright')
-          print('AXIOM_PHASE14_DIAGNOSTIC_PLAYWRIGHT_VERSION=1.61.0')
+          assert version('playwright') == '1.61.0'
+          print('AXIOM_PHASE14_INSTRUMENT_PLAYWRIGHT_VERSION=1.61.0')
           PY
-          curl --fail --silent --show-error --location --retry 3 --retry-all-errors https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip -o /tmp/p14pw161-vosk.zip
-          echo '30f26242c4eb449f948e42cb302dd7a686cb29a3423a8367f99ff41780942498  /tmp/p14pw161-vosk.zip' | sha256sum --check --strict
-          mkdir -p /tmp/p14pw161-vosk && unzip -q /tmp/p14pw161-vosk.zip -d /tmp/p14pw161-vosk
 
-      - name: Run exact unchanged Phase14 browser candidate on diagnostic toolchain
-        id: candidate
-        continue-on-error: true
+      - name: Build temporary instrumented copy without modifying candidate
         shell: bash
-        working-directory: /tmp/p14pw161-repo
-        env:
-          AXIOM_VOSK_MODEL_DIR: /tmp/p14pw161-vosk/vosk-model-small-en-us-0.15
-          AXIOM_VOSK_MODEL_SHA256: 30f26242c4eb449f948e42cb302dd7a686cb29a3423a8367f99ff41780942498
-          AXIOM_PHASE14_ARTIFACT_DIR: /tmp/p14pw161-browser
-        run: |
-          set -o pipefail
-          test "$(git rev-parse HEAD)" = e88a14e12b68fffb95e2dff59493c2ef15e11d11
-          test "$(git rev-parse HEAD^{tree})" = 1b77a4e79f4dcbc31efd12ebe093b1a076f5c51c
-          test "$(sha256sum axiom_interface/tests/run_browser_phase14.py | awk '{print $1}')" = 1dd1974296cb9039a4e102f94c97ffaa50a54877c75539d7a4038e10aff2e981
-          PYTHONPATH=. python axiom_interface/tests/run_browser_phase14.py 2>&1 | tee /tmp/p14pw161-browser.log
-
-      - name: Publish diagnostic-only status
-        if: always()
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CANDIDATE_OUTCOME: ${{ steps.candidate.outcome }}
+        working-directory: /tmp/p14inst-repo
         run: |
           set -euo pipefail
-          jq -nc --arg schema musitu.axiom.phase14.playwright161-diagnostic.v1 --arg run "$GITHUB_RUN_ID" --arg outcome "$CANDIDATE_OUTCOME" '{schema:$schema,run_id:($run|tonumber),authority_effect:"DIAGNOSTIC_TOOLCHAIN_VARIANT_ONLY_NO_PROMOTION_AUTHORITY",candidate_commit:"e88a14e12b68fffb95e2dff59493c2ef15e11d11",candidate_tree:"1b77a4e79f4dcbc31efd12ebe093b1a076f5c51c",browser_test_sha256:"1dd1974296cb9039a4e102f94c97ffaa50a54877c75539d7a4038e10aff2e981",playwright_version:"1.61.0",phase14_browser_candidate:$outcome,real_device_evidence:"NOT_RUN",promotion_authority:false}' >/tmp/p14pw161-summary.json
-          cat /tmp/p14pw161-summary.json
-          CONTENT=$(base64 -w0 /tmp/p14pw161-summary.json)
-          BODY=$(jq -nc --arg message 'diag: publish Axiom Phase14 pw161 candidate status' --arg content "$CONTENT" --arg branch "$GITHUB_REF_NAME" '{message:$message,content:$content,branch:$branch}')
-          curl -fsS -X PUT -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' -d "$BODY" "https://api.github.com/repos/$GITHUB_REPOSITORY/contents/ephemeral/axiom-phase14-pw161-result.json" >/dev/null
+          python - <<'PY'
+          from pathlib import Path
+          src = Path('axiom_interface/tests/run_browser_phase14.py')
+          original = src.read_text(encoding='utf-8')
+          needle = '''        completed = page.evaluate("()=>window.AxiomPwaHardening.queue.listActions()")\n        assert completed[0]["status"] == "COMPLETED_LOCAL"\n'''
+          injected = '''        completed = page.evaluate("()=>window.AxiomPwaHardening.queue.listActions()")\n        print("AXIOM_PHASE14_INSTRUMENT_ACTION_FROM_QUEUE_REFRESH=" + __import__("json").dumps({k: action.get(k) for k in ("action_id", "id", "type", "status", "queued_at") if k in action}, sort_keys=True), flush=True)\n        print("AXIOM_PHASE14_INSTRUMENT_NAVIGATOR_ONLINE=" + __import__("json").dumps(page.evaluate("()=>navigator.onLine")), flush=True)\n        print("AXIOM_PHASE14_INSTRUMENT_ACTION_ROWS=" + __import__("json").dumps([{k: row.get(k) for k in ("action_id", "id", "type", "status", "queued_at", "attempt_count", "last_error", "completed_at", "receipt_id") if k in row} for row in completed], sort_keys=True), flush=True)\n        diagnostic_receipts = page.evaluate("()=>window.AxiomPwaHardening.queue.listReceipts()")\n        print("AXIOM_PHASE14_INSTRUMENT_RECEIPT_ROWS=" + __import__("json").dumps([{k: row.get(k) for k in ("receipt_id", "action_id", "action_type", "type", "status", "created_at", "completed_at") if k in row} for row in diagnostic_receipts], sort_keys=True), flush=True)\n        try:\n            diagnostic_verify = page.evaluate("()=>window.AxiomPwaHardening.queue.verify()")\n            print("AXIOM_PHASE14_INSTRUMENT_QUEUE_VERIFY=" + __import__("json").dumps(diagnostic_verify, sort_keys=True), flush=True)\n        except Exception as diagnostic_exc:\n            print("AXIOM_PHASE14_INSTRUMENT_QUEUE_VERIFY_ERROR=" + type(diagnostic_exc).__name__, flush=True)\n        assert completed[0]["status"] == "COMPLETED_LOCAL"\n'''
+          assert needle in original, 'instrumentation insertion point missing'
+          modified = original.replace(needle, injected, 1)
+          out = Path('/tmp/run_browser_phase14_instrumented.py')
+          out.write_text(modified, encoding='utf-8')
+          assert src.read_text(encoding='utf-8') == original
+          print('AXIOM_PHASE14_INSTRUMENT_ORIGINAL_TEST_UNCHANGED')
+          PY
+          test "$(sha256sum axiom_interface/tests/run_browser_phase14.py | awk '{print $1}')" = 1dd1974296cb9039a4e102f94c97ffaa50a54877c75539d7a4038e10aff2e981
 
-      - name: Fail closed if unchanged candidate browser test failed
+      - name: Run instrumentation copy and preserve original assertion
+        id: instrument
+        continue-on-error: true
+        shell: bash
+        working-directory: /tmp/p14inst-repo
+        env:
+          AXIOM_PHASE14_ARTIFACT_DIR: /tmp/p14inst-browser
+        run: |
+          set -o pipefail
+          PYTHONPATH=. python /tmp/run_browser_phase14_instrumented.py 2>&1 | tee /tmp/p14inst.log
+
+      - name: Publish instrumentation-only boundary
         if: always()
         shell: bash
         env:
-          CANDIDATE_OUTCOME: ${{ steps.candidate.outcome }}
-        run: test "$CANDIDATE_OUTCOME" = success
+          INSTRUMENT_OUTCOME: ${{ steps.instrument.outcome }}
+        run: |
+          echo "AXIOM_PHASE14_INSTRUMENT_OUTCOME=$INSTRUMENT_OUTCOME"
+          echo 'AXIOM_PHASE14_INSTRUMENT_AUTHORITY_EFFECT=DIAGNOSTIC_INSTRUMENTATION_ONLY_NO_PROMOTION_AUTHORITY'
+          echo 'AXIOM_PHASE14_INSTRUMENT_REAL_DEVICE_EVIDENCE=NOT_RUN'
 
-      - name: Destroy candidate plaintext and ephemeral keys
+      - name: Destroy candidate plaintext and keys
         if: always()
         shell: bash
         run: |
-          rm -rf /tmp/p14pw161-repo /tmp/p14pw161-payload /tmp/p14pw161.tar.gz /tmp/p14pw161-transport.enc /tmp/p14pw161-download.json /tmp/p14pw161-handoff.json /tmp/p14pw161-api.json /tmp/axiom-p14pw161-private.bin /tmp/axiom-p14pw161-pubkey.txt /tmp/p14pw161-vosk /tmp/p14pw161-vosk.zip /tmp/p14pw161-browser /tmp/p14pw161-browser.log
+          rm -rf /tmp/p14inst-repo /tmp/p14inst-payload /tmp/p14inst.tar.gz /tmp/p14inst-transport.enc /tmp/p14inst-download.json /tmp/p14inst-handoff.json /tmp/p14inst-api.json /tmp/axiom-p14inst-private.bin /tmp/axiom-p14inst-pubkey.txt /tmp/run_browser_phase14_instrumented.py /tmp/p14inst-browser /tmp/p14inst.log
