@@ -1,5 +1,5 @@
 name: Axiom Phase12 Exact Live Commit Encrypted 20260913
-# rendezvous-session: 20260913T1618+0200-run-scoped
+# rendezvous-session: 20260913T1620+0200-authenticated-raw-aes
 
 on:
   push:
@@ -60,11 +60,35 @@ jobs:
           printf '%s' "$data_b64" | base64 -d > /tmp/pointer_data.enc
           openssl pkeyutl -decrypt -inkey /tmp/axiom_transport_priv.pem -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -in /tmp/pointer_key.enc -out /tmp/pointer_pass.txt
           openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -in /tmp/pointer_data.enc -out /tmp/pointer.json -pass file:/tmp/pointer_pass.txt
-          python -c "import json; j=json.load(open('/tmp/pointer.json','r',encoding='utf-8')); [(_ for _ in ()).throw(AssertionError(k)) for k in ('url','payload_pass','cipher_sha256','plain_sha256','plain_size') if not j.get(k)]; open('/tmp/payload_url.txt','w').write(j['url']); open('/tmp/payload_pass.txt','w').write(j['payload_pass']); open('/tmp/cipher_sha.txt','w').write(j['cipher_sha256']); open('/tmp/plain_sha.txt','w').write(j['plain_sha256']); open('/tmp/plain_size.txt','w').write(str(j['plain_size']))"
+          python - <<'PY'
+          import json
+          j=json.load(open('/tmp/pointer.json','r',encoding='utf-8'))
+          required=('url','transport_secret_b64','cipher_sha256','hmac_sha256','plain_sha256','plain_size')
+          for k in required:
+              assert j.get(k), k
+          open('/tmp/payload_url.txt','w').write(j['url'])
+          open('/tmp/transport_secret_b64.txt','w').write(j['transport_secret_b64'])
+          open('/tmp/cipher_sha.txt','w').write(j['cipher_sha256'])
+          open('/tmp/hmac_sha.txt','w').write(j['hmac_sha256'])
+          open('/tmp/plain_sha.txt','w').write(j['plain_sha256'])
+          open('/tmp/plain_size.txt','w').write(str(j['plain_size']))
+          PY
           url=$(cat /tmp/payload_url.txt)
           curl --fail --silent --show-error --location "$url" --output /tmp/axiom_payload.enc
           echo "$(cat /tmp/cipher_sha.txt)  /tmp/axiom_payload.enc" | sha256sum --check --strict
-          openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -in /tmp/axiom_payload.enc -out /tmp/axiom_payload.bundle -pass file:/tmp/payload_pass.txt
+          python - <<'PY'
+          import base64, hashlib, hmac
+          s=base64.b64decode(open('/tmp/transport_secret_b64.txt').read().strip())
+          assert len(s)==80
+          ct=open('/tmp/axiom_payload.enc','rb').read()
+          got=hmac.new(s[32:64],ct,hashlib.sha256).hexdigest()
+          expected=open('/tmp/hmac_sha.txt').read().strip()
+          assert hmac.compare_digest(got,expected)
+          open('/tmp/aes_key_hex.txt','w').write(s[:32].hex())
+          open('/tmp/aes_iv_hex.txt','w').write(s[64:80].hex())
+          PY
+          echo 'AXIOM_PHASE12_ENCRYPTED_PAYLOAD_HMAC_VERIFIED'
+          openssl enc -d -aes-256-cbc -K "$(cat /tmp/aes_key_hex.txt)" -iv "$(cat /tmp/aes_iv_hex.txt)" -in /tmp/axiom_payload.enc -out /tmp/axiom_payload.bundle
           test "$(stat -c%s /tmp/axiom_payload.bundle)" = "$(cat /tmp/plain_size.txt)"
           echo "$(cat /tmp/plain_sha.txt)  /tmp/axiom_payload.bundle" | sha256sum --check --strict
           git init -q /tmp/axiom-verify
@@ -197,4 +221,4 @@ jobs:
         if: always()
         shell: bash
         run: |
-          rm -rf /tmp/axiom-src /tmp/axiom-verify /tmp/axiom_payload.bundle /tmp/axiom_payload.enc /tmp/axiom_transport_priv.pem /tmp/axiom_transport_pub.pem /tmp/pointer* /tmp/payload* /tmp/cipher_sha.txt /tmp/plain_sha.txt /tmp/plain_size.txt /tmp/pub_put.json /tmp/pub_put_response.json /tmp/phase12-live-commit.raw /tmp/axiom-vosk /tmp/vosk-model-small-en-us-0.15.zip
+          rm -rf /tmp/axiom-src /tmp/axiom-verify /tmp/axiom_payload.bundle /tmp/axiom_payload.enc /tmp/axiom_transport_priv.pem /tmp/axiom_transport_pub.pem /tmp/pointer* /tmp/payload* /tmp/transport_secret_b64.txt /tmp/cipher_sha.txt /tmp/hmac_sha.txt /tmp/plain_sha.txt /tmp/plain_size.txt /tmp/aes_key_hex.txt /tmp/aes_iv_hex.txt /tmp/pub_put.json /tmp/pub_put_response.json /tmp/phase12-live-commit.raw /tmp/axiom-vosk /tmp/vosk-model-small-en-us-0.15.zip
