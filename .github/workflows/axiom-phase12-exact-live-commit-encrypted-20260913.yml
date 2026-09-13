@@ -1,5 +1,5 @@
 name: Axiom Phase12 Exact Live Commit Encrypted 20260913
-# rendezvous-session: 20260913T1505+0200
+# rendezvous-session: 20260913T1618+0200-run-scoped
 
 on:
   push:
@@ -37,13 +37,15 @@ jobs:
           openssl pkey -in /tmp/axiom_transport_priv.pem -pubout -out /tmp/axiom_transport_pub.pem >/dev/null 2>&1
           pub_b64=$(base64 -w0 /tmp/axiom_transport_pub.pem)
           encoded=$(printf '%s' "$pub_b64" | base64 -w0)
+          pub_path=".axiom_transport/phase12_live_${GITHUB_RUN_ID}_public_key.b64"
           jq -n --arg message 'diag: publish exact-live Phase12 ephemeral transport public key' --arg content "$encoded" --arg branch "$GITHUB_REF_NAME" '{message:$message,content:$content,branch:$branch}' >/tmp/pub_put.json
-          curl --fail --silent --show-error --request PUT -H "Authorization: Bearer ${GH_TOKEN}" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/.axiom_transport/phase12_live_public_key.b64" --data-binary @/tmp/pub_put.json >/tmp/pub_put_response.json
-          echo 'AXIOM_PHASE12_EXACT_LIVE_EPHEMERAL_PUBLIC_KEY_PUBLISHED'
+          curl --fail --silent --show-error --request PUT -H "Authorization: Bearer ${GH_TOKEN}" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/${pub_path}" --data-binary @/tmp/pub_put.json >/tmp/pub_put_response.json
+          echo "AXIOM_PHASE12_EXACT_LIVE_EPHEMERAL_PUBLIC_KEY_PUBLISHED run=${GITHUB_RUN_ID}"
 
           pointer=/tmp/phase12_live_pointer.txt
+          pointer_api="https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/.axiom_transport/phase12_live_${GITHUB_RUN_ID}_pointer.txt?ref=diagnostic%2Faxiom-runner-canary-20260913"
           for i in $(seq 1 120); do
-            code=$(curl -L -sS -o /tmp/pointer_api.json -w '%{http_code}' -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/.axiom_transport/phase12_live_pointer.txt?ref=diagnostic%2Faxiom-runner-canary-20260913&nonce=${i}" || true)
+            code=$(curl -L -sS -o /tmp/pointer_api.json -w '%{http_code}' -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "${pointer_api}&nonce=${i}" || true)
             if [ "$code" = 200 ]; then
               python -c "import base64,json; j=json.load(open('/tmp/pointer_api.json','r',encoding='utf-8')); open('/tmp/phase12_live_pointer.txt','wb').write(base64.b64decode(j['content']))"
               break
