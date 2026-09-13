@@ -1,0 +1,113 @@
+name: Axiom Playwright Offline Reload Reproducer 20260913
+
+on:
+  push:
+    branches:
+      - tmp/axiom-playwright-offline-repro-20260913-1646
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-reload-repro:
+    name: Playwright ${{ matrix.playwright }} offline reload
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        playwright: ["1.61.1", "1.62.0", "1.62.1"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.14"
+      - name: Install isolated Playwright version
+        run: |
+          python -m pip install --disable-pip-version-check "playwright==${{ matrix.playwright }}"
+          python -m playwright install chromium
+      - name: Run source-free offline reload reproducer
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/offline_repro.py <<'PY'
+          from __future__ import annotations
+          import json
+          import tempfile
+          import threading
+          import time
+          from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+          from pathlib import Path
+          from playwright.sync_api import sync_playwright
+          from importlib.metadata import version
+
+          root = Path(tempfile.mkdtemp(prefix="axiom-pw-offline-repro-"))
+          (root / "index.html").write_text("""<!doctype html><meta charset='utf-8'><title>offline repro</title><body>offline-repro<script>navigator.serviceWorker.register('./sw.js');</script></body>""", encoding="utf-8")
+          (root / "sw.js").write_text("""
+          const CACHE='axiom-playwright-offline-repro-v1';
+          self.addEventListener('install', event => event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(['./','./index.html','./sw.js'])).then(() => self.skipWaiting())));
+          self.addEventListener('activate', event => event.waitUntil(self.clients.claim()));
+          self.addEventListener('fetch', event => {
+            if (event.request.mode === 'navigate') {
+              event.respondWith(fetch(event.request).catch(() => caches.match('./index.html')));
+              return;
+            }
+            event.respondWith(caches.match(event.request).then(cached => cached || fetch(event.request)));
+          });
+          """, encoding="utf-8")
+
+          class Quiet(SimpleHTTPRequestHandler):
+              def log_message(self, *_):
+                  pass
+
+          handler = lambda *args, **kwargs: Quiet(*args, directory=str(root), **kwargs)
+          server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+          threading.Thread(target=server.serve_forever, daemon=True).start()
+          origin = f"http://127.0.0.1:{server.server_port}"
+          result = {"playwright": version("playwright"), "origin": "localhost-redacted"}
+          try:
+              with sync_playwright() as p:
+                  browser = p.chromium.launch(headless=True)
+                  context = browser.new_context()
+                  page = context.new_page()
+                  page.add_init_script("window.__axiomNetEvents=[];addEventListener('online',()=>window.__axiomNetEvents.push('online'));addEventListener('offline',()=>window.__axiomNetEvents.push('offline'));" )
+                  page.goto(origin + "/index.html", wait_until="networkidle")
+                  page.wait_for_function("()=>navigator.serviceWorker && navigator.serviceWorker.ready")
+                  page.wait_for_function("()=>navigator.serviceWorker.controller !== null")
+                  result["initial_onLine"] = page.evaluate("()=>navigator.onLine")
+                  result["initial_controlled"] = page.evaluate("()=>Boolean(navigator.serviceWorker.controller)")
+
+                  context.set_offline(True)
+                  page.wait_for_timeout(100)
+                  result["after_toggle_onLine"] = page.evaluate("()=>navigator.onLine")
+                  result["events_after_toggle"] = page.evaluate("()=>window.__axiomNetEvents.slice()")
+
+                  try:
+                      page.reload(wait_until="domcontentloaded", timeout=15000)
+                      result["reload_succeeded"] = True
+                      page.wait_for_timeout(100)
+                      result["after_offline_reload_onLine"] = page.evaluate("()=>navigator.onLine")
+                      result["after_offline_reload_controlled"] = page.evaluate("()=>Boolean(navigator.serviceWorker.controller)")
+                      result["events_after_reload"] = page.evaluate("()=>window.__axiomNetEvents.slice()")
+                      result["uncached_fetch_failed"] = page.evaluate("""async()=>{try{await fetch('/uncached-'+crypto.randomUUID()+'.txt');return false}catch{return true}}""")
+                  except Exception as exc:
+                      result["reload_succeeded"] = False
+                      result["reload_error_type"] = type(exc).__name__
+
+                  context.set_offline(False)
+                  page.wait_for_timeout(100)
+                  result["after_restore_onLine"] = page.evaluate("()=>navigator.onLine")
+                  browser.close()
+          finally:
+              server.shutdown()
+              server.server_close()
+
+          if result.get("after_toggle_onLine") is False and result.get("after_offline_reload_onLine") is True and result.get("uncached_fetch_failed") is True:
+              result["classification"] = "PLAYWRIGHT_OFFLINE_RELOAD_NAVIGATOR_SIGNAL_REGRESSION_REPRODUCED"
+          elif result.get("after_offline_reload_onLine") is False and result.get("uncached_fetch_failed") is True:
+              result["classification"] = "OFFLINE_RELOAD_SIGNAL_CONSISTENT"
+          else:
+              result["classification"] = "INCONCLUSIVE"
+          print("AXIOM_PLAYWRIGHT_OFFLINE_REPRO=" + json.dumps(result, sort_keys=True))
+          PY
+          python /tmp/offline_repro.py
