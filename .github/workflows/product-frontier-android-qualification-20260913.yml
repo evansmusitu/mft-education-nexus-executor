@@ -7,6 +7,7 @@ permissions: {contents: read}
 env:
   SOURCE_ZIP_SHA256: 14ba42284e284f902adef81e1049c021a67cb053c99db9db47b97d0b1706edb3
   SOURCE_MANIFEST_SHA256: 2f0d1f2c9724e9704bfe122c270412a49c5aebc63984d49e32850c6d56f4666c
+  V3_PACKAGE_SHA256: 90fab790cf696ca6fd65ceb30815bc7175f1f59abddc6f096ae471cee7ae5f21
   ANDROID_DIR: android_qualification_work/MFT_SOVEREIGN_INSTITUTION_ANDROID_FRONTIER_HARDENED_SOURCE
   PACKAGE_ID: com.musitu.sovereigninstitution
   EXPO_PUBLIC_MFT_API_URL: https://institution.example.invalid
@@ -18,7 +19,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: {ref: product-frontier-android-20260913}
-      - name: Reassemble and verify exact sealed source
+      - name: Reassemble verify V2 and apply sealed V3 dependency correction
         run: |
           set -euo pipefail
           cat product_frontier_android_20260913/sealed_v2.b64.{1,2,3,4} | base64 -d > /tmp/sealed.zip
@@ -26,31 +27,31 @@ jobs:
           rm -rf android_qualification_work && mkdir android_qualification_work
           unzip -q /tmp/sealed.zip -d android_qualification_work
           cd "$ANDROID_DIR"
-          echo "${SOURCE_MANIFEST_SHA256}  SHA256SUMS.txt" | sha256sum -c -
-          sha256sum -c SHA256SUMS.txt
+          echo "${SOURCE_MANIFEST_SHA256}  SHA256SUMS.txt" | sha256sum -c -; sha256sum -c SHA256SUMS.txt
+          python - <<'PY'
+          import json
+          p='package.json'; d=json.load(open(p)); d['devDependencies']['typescript']='~6.0.3'; open(p,'w').write(json.dumps(d,indent=2)+'\n')
+          PY
+          echo "${V3_PACKAGE_SHA256}  package.json" | sha256sum -c -
       - uses: actions/setup-node@v4
         with: {node-version: '22'}
       - uses: actions/setup-java@v4
         with: {distribution: temurin, java-version: '17'}
-      - name: Resolve validate and prebuild
+      - name: Resolve validate and prebuild V3 candidate
         run: |
-          set -euo pipefail
-          cd "$ANDROID_DIR"
+          set -euo pipefail; cd "$ANDROID_DIR"
           npm install --no-audit --no-fund
           npx expo-doctor
           npx expo prebuild --platform android --clean --no-install
           grep -R 'usesCleartextTraffic="false"' android/app/src/main/AndroidManifest.xml
       - name: Build release APK and AAB
         run: |
-          set -euo pipefail
-          cd "$ANDROID_DIR/android"; chmod +x gradlew
+          set -euo pipefail; cd "$ANDROID_DIR/android"; chmod +x gradlew
           ./gradlew --no-daemon clean lintRelease assembleRelease bundleRelease
       - name: Inspect artifacts
         run: |
-          set -euo pipefail
-          cd "$ANDROID_DIR"
-          APK="$(find android/app/build/outputs/apk/release -name '*.apk' -type f | head -1)"; AAB="$(find android/app/build/outputs/bundle/release -name '*.aab' -type f | head -1)"
-          test -f "$APK" && test -f "$AAB"
+          set -euo pipefail; cd "$ANDROID_DIR"
+          APK="$(find android/app/build/outputs/apk/release -name '*.apk' -type f | head -1)"; AAB="$(find android/app/build/outputs/bundle/release -name '*.aab' -type f | head -1)"; test -f "$APK" && test -f "$AAB"
           BT="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)"
           "$BT/aapt" dump badging "$APK" | tee android_badging.txt
           grep "package: name='${PACKAGE_ID}'" android_badging.txt; grep "targetSdkVersion:'36'" android_badging.txt; ! grep -q 'application-debuggable' android_badging.txt
