@@ -19,6 +19,7 @@ PARENT_OVERLAY_SHA256 = '32e83dabc02b99c5441d91edb4bd6fdc8e86d2c6bb4ab270dac40d5
 RUNTIME_ROOT = Path('/opt/mft-product-frontier/runtime')
 DATA_ROOT = Path('/var/lib/mft-product-frontier')
 DB_PATH = DATA_ROOT / 'institution.db'
+QUALIFICATION_INSTITUTION = 'qualification-inst-1'
 
 app = modal.App(APP_NAME)
 volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
@@ -50,10 +51,13 @@ def verify_and_extract() -> Path:
         manifest = json.loads(archive.read('RUNTIME_SOURCE_MANIFEST.json'))
         if manifest.get('parent_overlay_sha256') != PARENT_OVERLAY_SHA256:
             raise RuntimeError('parent_overlay_sha256_mismatch')
-        expected = {row['path']: row for row in manifest.get('files', [])}
+        expected_rows = manifest.get('files', [])
+        expected = {row['path'] for row in expected_rows}
         if not expected:
             raise RuntimeError('runtime_source_manifest_empty')
-        for name, row in expected.items():
+        if set(archive.namelist()) != expected | {'RUNTIME_SOURCE_MANIFEST.json'}:
+            raise RuntimeError('runtime_source_unexpected_files')
+        for name, row in ((row['path'], row) for row in expected_rows):
             pure = PurePosixPath(name)
             if pure.is_absolute() or '..' in pure.parts:
                 raise RuntimeError(f'unsafe_runtime_path:{name}')
@@ -70,6 +74,62 @@ def verify_and_extract() -> Path:
     if not (RUNTIME_ROOT / 'institution_ui' / 'index.html').is_file():
         raise RuntimeError('runtime_ui_missing')
     return RUNTIME_ROOT
+
+
+def qualification_password(origin_secret: str) -> str:
+    return hashlib.sha256(
+        f'mft-product-frontier-qa-user-v1:{origin_secret}'.encode('utf-8')
+    ).hexdigest()
+
+
+def ensure_qualification_fixture(api, origin_secret: str) -> None:
+    if os.environ.get('MFT_QUALIFICATION_BOOTSTRAP') != '1':
+        return
+    identity = api.state.identity
+    service = api.state.service
+    password = qualification_password(origin_secret)
+    users = [
+        ('qa-head-1', 'head', 'HEADMASTER', {}),
+        ('qa-head-2', 'head2', 'HEADMASTER', {}),
+        ('qa-bursar', 'bursar', 'BURSAR', {}),
+        ('qa-teacher', 'teacher', 'TEACHER', {'sections': ['S1']}),
+        ('qa-family', 'family', 'FAMILY', {'households': ['hh-1']}),
+        ('qa-learner', 'learner', 'LEARNER', {'learner_id': 'L1'}),
+        ('qa-ops', 'ops', 'OPERATIONS', {}),
+    ]
+    existing = {
+        row['username']: (row['user_id'], row['role'], json.loads(row['scope_json']))
+        for row in identity.conn.execute(
+            'SELECT user_id,username,role,scope_json FROM app_users WHERE institution_id=?',
+            (QUALIFICATION_INSTITUTION,),
+        ).fetchall()
+    }
+    for user_id, username, role, scope in users:
+        current = existing.get(username)
+        if current is None:
+            identity.create_user(
+                QUALIFICATION_INSTITUTION, user_id, username, password, role, scope=scope
+            )
+        elif current != (user_id, role, scope):
+            raise RuntimeError(f'qualification_identity_conflict:{username}')
+
+    try:
+        learner = service.entity_snapshot(QUALIFICATION_INSTITUTION, 'learner', 'L1')
+        if learner['data'].get('qualification_fixture') is not True:
+            raise RuntimeError('qualification_learner_conflict')
+    except KeyError:
+        service.upsert_entity(
+            QUALIFICATION_INSTITUTION,
+            'learner',
+            'L1',
+            {
+                'mastery': 40,
+                'attendance_rate': 0.75,
+                'name': 'Qualification Learner',
+                'qualification_fixture': True,
+            },
+        )
+    volume.commit()
 
 
 @app.function(
@@ -105,6 +165,7 @@ def runtime():
 
     DATA_ROOT.mkdir(parents=True, exist_ok=True)
     api = create_app(str(DB_PATH), identity_key=identity_key)
+    ensure_qualification_fixture(api, origin_secret)
 
     @api.middleware('http')
     async def edge_boundary(request: Request, call_next):
@@ -128,6 +189,7 @@ def runtime():
             'parent_overlay_sha256': PARENT_OVERLAY_SHA256,
             'database': 'sqlite-persistent-modal-volume',
             'modal_max_containers': 1,
+            'qualification_fixture': os.environ.get('MFT_QUALIFICATION_BOOTSTRAP') == '1',
             'promotion_effect': 'NONE',
         }
 
