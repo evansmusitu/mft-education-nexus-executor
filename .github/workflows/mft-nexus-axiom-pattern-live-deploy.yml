@@ -44,6 +44,8 @@ jobs:
       PAYNOW_INTEGRATION_KEY: ${{ secrets.PAYNOW_INTEGRATION_KEY }}
       REVENUE_ADMIN_TOKEN: ${{ secrets.REVENUE_ADMIN_TOKEN }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_EMAIL: ${{ secrets.CLOUDFLARE_EMAIL }}
+      CLOUDFLARE_API_KEY: ${{ secrets.CLOUDFLARE_GLOBAL_API_KEY }}
     steps:
       - uses: actions/checkout@v6
 
@@ -55,9 +57,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for n in MODAL_TOKEN_ID MODAL_TOKEN_SECRET NEXUS_NEON_DATABASE_URL NEXUS_R2_ACCESS_KEY_ID NEXUS_R2_SECRET_ACCESS_KEY PAYNOW_INTEGRATION_KEY REVENUE_ADMIN_TOKEN CLOUDFLARE_API_TOKEN; do
+          for n in MODAL_TOKEN_ID MODAL_TOKEN_SECRET NEXUS_NEON_DATABASE_URL NEXUS_R2_ACCESS_KEY_ID NEXUS_R2_SECRET_ACCESS_KEY PAYNOW_INTEGRATION_KEY REVENUE_ADMIN_TOKEN; do
             test -n "${!n:-}" || { echo "$n is not configured" >&2; exit 20; }
           done
+          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
+            test -n "${CLOUDFLARE_EMAIL:-}" || { echo 'CLOUDFLARE_EMAIL is not configured and no API token was supplied' >&2; exit 20; }
+            test -n "${CLOUDFLARE_API_KEY:-}" || { echo 'CLOUDFLARE_GLOBAL_API_KEY is not configured and no API token was supplied' >&2; exit 20; }
+          fi
           test ${#REVENUE_ADMIN_TOKEN} -ge 32 || { echo 'REVENUE_ADMIN_TOKEN must be at least 32 characters' >&2; exit 21; }
           case "$NEXUS_NEON_DATABASE_URL" in
             postgresql://nexus_live_runtime:*|postgres://nexus_live_runtime:*) ;;
@@ -137,8 +143,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [ -n "${CLOUDFLARE_API_TOKEN:-}" ]; then
+            CF_AUTH=( -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" )
+          else
+            CF_AUTH=( -H "X-Auth-Email: ${CLOUDFLARE_EMAIL}" -H "X-Auth-Key: ${CLOUDFLARE_API_KEY}" )
+          fi
           code="$(curl -sS -o edge-settings.json -w '%{http_code}' \
-            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            "${CF_AUTH[@]}" \
             "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/${CF_WORKER}/settings" || true)"
           if [ "$code" = 200 ]; then
             python - <<'PY'
