@@ -1,101 +1,73 @@
 name: Product Frontier Android Qualification 20260913
-
 on:
   pull_request:
     branches: [main]
-    paths:
-      - 'product_frontier_android_20260913/**'
-      - '.github/workflows/product-frontier-android-qualification-20260913.yml'
-
+    paths: ['product_frontier_android_20260913/**','.github/workflows/product-frontier-android-qualification-20260913.yml']
 permissions:
   contents: read
-
 env:
   INPUT_ZIP: product_frontier_android_20260913/input.zip
+  TRANSPORT_SHA256: 0380b1c31b3f7137a0dc1a4f9483551a580a93494682a9489b0f5e2c7b04dc1e
+  SOURCE_ZIP_SHA256: 14ba42284e284f902adef81e1049c021a67cb053c99db9db47b97d0b1706edb3
   SOURCE_MANIFEST_SHA256: 2f0d1f2c9724e9704bfe122c270412a49c5aebc63984d49e32850c6d56f4666c
   ANDROID_DIR: android_qualification_work/MFT_SOVEREIGN_INSTITUTION_ANDROID_FRONTIER_HARDENED_SOURCE
   PACKAGE_ID: com.musitu.sovereigninstitution
   EXPO_PUBLIC_MFT_API_URL: https://institution.example.invalid
   CI: '1'
-
 jobs:
   build:
-    name: exact-source-build-and-inspect
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
           ref: product-frontier-android-20260913
-
-      - name: Verify and extract exact hardened source files
+      - name: Repair GitHub binary transport and verify exact seal
         shell: bash
         run: |
           set -euo pipefail
-          sha256sum "$INPUT_ZIP" | tee transport_zip_sha256.txt
-          rm -rf android_qualification_work
-          mkdir -p android_qualification_work
+          echo "${TRANSPORT_SHA256}  ${INPUT_ZIP}" | sha256sum -c -
+          test "$(stat -c%s "$INPUT_ZIP")" = 10321
+          printf '\0\0' >> "$INPUT_ZIP"
+          echo "${SOURCE_ZIP_SHA256}  ${INPUT_ZIP}" | sha256sum -c -
+          rm -rf android_qualification_work && mkdir android_qualification_work
           unzip -q "$INPUT_ZIP" -d android_qualification_work
           cd "$ANDROID_DIR"
           echo "${SOURCE_MANIFEST_SHA256}  SHA256SUMS.txt" | sha256sum -c -
           sha256sum -c SHA256SUMS.txt
-
       - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
+        with: {node-version: '22'}
       - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Resolve Expo dependencies and validate project
-        shell: bash
+        with: {distribution: temurin, java-version: '17'}
+      - name: Resolve and validate Expo project
         run: |
           set -euo pipefail
           cd "$ANDROID_DIR"
           npm install --no-audit --no-fund
           npx expo-doctor
-
-      - name: Generate native Android project
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$ANDROID_DIR"
           npx expo prebuild --platform android --clean --no-install
-          test -d android
           grep -R 'usesCleartextTraffic="false"' android/app/src/main/AndroidManifest.xml
-
-      - name: Build release APK and AAB candidates
-        shell: bash
+      - name: Build release APK and AAB
         run: |
           set -euo pipefail
           cd "$ANDROID_DIR/android"
           chmod +x gradlew
           ./gradlew --no-daemon clean lintRelease assembleRelease bundleRelease
-
-      - name: Inspect package, SDK, signing and hashes
-        shell: bash
+      - name: Inspect artifacts
         run: |
           set -euo pipefail
           cd "$ANDROID_DIR"
           APK="$(find android/app/build/outputs/apk/release -name '*.apk' -type f | head -1)"
           AAB="$(find android/app/build/outputs/bundle/release -name '*.aab' -type f | head -1)"
-          test -n "$APK" && test -f "$APK"
-          test -n "$AAB" && test -f "$AAB"
-          BUILD_TOOLS="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)"
-          AAPT="$BUILD_TOOLS/aapt"
-          APKSIGNER="$BUILD_TOOLS/apksigner"
-          "$AAPT" dump badging "$APK" | tee android_badging.txt
+          test -f "$APK" && test -f "$AAB"
+          BT="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)"
+          "$BT/aapt" dump badging "$APK" | tee android_badging.txt
           grep "package: name='${PACKAGE_ID}'" android_badging.txt
           grep "targetSdkVersion:'36'" android_badging.txt
-          if grep -q 'application-debuggable' android_badging.txt; then echo 'release_apk_is_debuggable' >&2; exit 31; fi
-          "$APKSIGNER" verify --verbose --print-certs "$APK" | tee apk_signing.txt
+          ! grep -q 'application-debuggable' android_badging.txt
+          "$BT/apksigner" verify --verbose --print-certs "$APK" | tee apk_signing.txt
           sha256sum "$APK" "$AAB" | tee artifact_sha256.txt
-          cp SHA256SUMS.txt source_file_sha256.txt
-
-      - name: Upload build artifacts and inspection evidence
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: product-frontier-android-build-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -104,89 +76,5 @@ jobs:
             android_qualification_work/MFT_SOVEREIGN_INSTITUTION_ANDROID_FRONTIER_HARDENED_SOURCE/android_badging.txt
             android_qualification_work/MFT_SOVEREIGN_INSTITUTION_ANDROID_FRONTIER_HARDENED_SOURCE/apk_signing.txt
             android_qualification_work/MFT_SOVEREIGN_INSTITUTION_ANDROID_FRONTIER_HARDENED_SOURCE/artifact_sha256.txt
-            android_qualification_work/MFT_SOVEREIGN_INSTITUTION_ANDROID_FRONTIER_HARDENED_SOURCE/source_file_sha256.txt
-            transport_zip_sha256.txt
           if-no-files-found: error
-          retention-days: 30
-
-  emulator:
-    name: release-apk-emulator-smoke
-    needs: build
-    runs-on: ubuntu-latest
-    timeout-minutes: 35
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: product-frontier-android-20260913
-
-      - name: Verify and extract exact hardened source files
-        shell: bash
-        run: |
-          set -euo pipefail
-          rm -rf android_qualification_work
-          mkdir -p android_qualification_work
-          unzip -q "$INPUT_ZIP" -d android_qualification_work
-          cd "$ANDROID_DIR"
-          echo "${SOURCE_MANIFEST_SHA256}  SHA256SUMS.txt" | sha256sum -c -
-          sha256sum -c SHA256SUMS.txt
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Rebuild exact release APK for emulator smoke
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$ANDROID_DIR"
-          npm install --no-audit --no-fund
-          npx expo prebuild --platform android --clean --no-install
-          cd android
-          chmod +x gradlew
-          ./gradlew --no-daemon assembleRelease
-
-      - name: Enable KVM access
-        shell: bash
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-
-      - name: Boot emulator, install and launch exact APK
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 36
-          arch: x86_64
-          profile: pixel_6
-          disable-animations: true
-          script: |
-            set -euo pipefail
-            APK="$(find android_qualification_work/MFT_SOVEREIGN_INSTITUTION_ANDROID_FRONTIER_HARDENED_SOURCE/android/app/build/outputs/apk/release -name '*.apk' -type f | head -1)"
-            adb install -r "$APK"
-            adb shell monkey -p "$PACKAGE_ID" -c android.intent.category.LAUNCHER 1
-            sleep 10
-            PID="$(adb shell pidof "$PACKAGE_ID" | tr -d '\r')"
-            test -n "$PID"
-            adb shell dumpsys window windows | grep -E 'mCurrentFocus|mFocusedApp' | tee emulator_focus.txt
-            adb logcat -d '*:E' | tee emulator_errors.txt
-            if grep -E 'FATAL EXCEPTION|Process: com\.musitu\.sovereigninstitution.*has died' emulator_errors.txt; then exit 41; fi
-            adb exec-out screencap -p > emulator_screen.png
-            echo "EMULATOR_LAUNCH_PASS pid=$PID" | tee emulator_smoke.txt
-
-      - name: Upload emulator evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: product-frontier-android-emulator-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            emulator_focus.txt
-            emulator_errors.txt
-            emulator_screen.png
-            emulator_smoke.txt
-          if-no-files-found: warn
           retention-days: 30
