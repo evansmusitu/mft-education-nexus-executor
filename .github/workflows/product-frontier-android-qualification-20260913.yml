@@ -11,6 +11,7 @@ env:
   ANDROID_DIR: android_qualification_work/MFT_SOVEREIGN_INSTITUTION_ANDROID_FRONTIER_HARDENED_SOURCE
   PACKAGE_ID: com.musitu.sovereigninstitution
   EXPO_PUBLIC_MFT_API_URL: https://institution.example.invalid
+  NODE_ENV: production
   CI: '1'
 jobs:
   build:
@@ -27,10 +28,14 @@ jobs:
           rm -rf android_qualification_work && mkdir android_qualification_work
           unzip -q /tmp/sealed.zip -d android_qualification_work
           cd "$ANDROID_DIR"
-          echo "${SOURCE_MANIFEST_SHA256}  SHA256SUMS.txt" | sha256sum -c -; sha256sum -c SHA256SUMS.txt
+          echo "${SOURCE_MANIFEST_SHA256}  SHA256SUMS.txt" | sha256sum -c -
+          sha256sum -c SHA256SUMS.txt
           python - <<'PY'
           import json
-          p='package.json'; d=json.load(open(p)); d['devDependencies']['typescript']='~6.0.3'; open(p,'w').write(json.dumps(d,indent=2)+'\n')
+          p='package.json'
+          d=json.load(open(p))
+          d['devDependencies']['typescript']='~6.0.3'
+          open(p,'w').write(json.dumps(d,indent=2)+'\n')
           PY
           echo "${V3_PACKAGE_SHA256}  package.json" | sha256sum -c -
       - uses: actions/setup-node@v4
@@ -39,22 +44,30 @@ jobs:
         with: {distribution: temurin, java-version: '17'}
       - name: Resolve validate and prebuild V3 candidate
         run: |
-          set -euo pipefail; cd "$ANDROID_DIR"
+          set -euo pipefail
+          cd "$ANDROID_DIR"
           npm install --no-audit --no-fund
           npx expo-doctor
           npx expo prebuild --platform android --clean --no-install
           grep -R 'usesCleartextTraffic="false"' android/app/src/main/AndroidManifest.xml
       - name: Build release APK and AAB
         run: |
-          set -euo pipefail; cd "$ANDROID_DIR/android"; chmod +x gradlew
+          set -euo pipefail
+          cd "$ANDROID_DIR/android"
+          chmod +x gradlew
           ./gradlew --no-daemon clean lintRelease assembleRelease bundleRelease
       - name: Inspect artifacts
         run: |
-          set -euo pipefail; cd "$ANDROID_DIR"
-          APK="$(find android/app/build/outputs/apk/release -name '*.apk' -type f | head -1)"; AAB="$(find android/app/build/outputs/bundle/release -name '*.aab' -type f | head -1)"; test -f "$APK" && test -f "$AAB"
+          set -euo pipefail
+          cd "$ANDROID_DIR"
+          APK="$(find android/app/build/outputs/apk/release -name '*.apk' -type f | head -1)"
+          AAB="$(find android/app/build/outputs/bundle/release -name '*.aab' -type f | head -1)"
+          test -f "$APK" && test -f "$AAB"
           BT="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)"
           "$BT/aapt" dump badging "$APK" | tee android_badging.txt
-          grep "package: name='${PACKAGE_ID}'" android_badging.txt; grep "targetSdkVersion:'36'" android_badging.txt; ! grep -q 'application-debuggable' android_badging.txt
+          grep "package: name='${PACKAGE_ID}'" android_badging.txt
+          grep "targetSdkVersion:'36'" android_badging.txt
+          ! grep -q 'application-debuggable' android_badging.txt
           "$BT/apksigner" verify --verbose --print-certs "$APK" | tee apk_signing.txt
           sha256sum "$APK" "$AAB" | tee artifact_sha256.txt
       - uses: actions/upload-artifact@v4
@@ -67,3 +80,67 @@ jobs:
             android_qualification_work/MFT_SOVEREIGN_INSTITUTION_ANDROID_FRONTIER_HARDENED_SOURCE/apk_signing.txt
             android_qualification_work/MFT_SOVEREIGN_INSTITUTION_ANDROID_FRONTIER_HARDENED_SOURCE/artifact_sha256.txt
           if-no-files-found: error
+          retention-days: 30
+
+  emulator:
+    name: api36-release-apk-smoke
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: product-frontier-android-build-${{ github.run_id }}-${{ github.run_attempt }}
+          path: emulator_input
+      - name: Pin exact APK hash from build evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="$(find emulator_input -name '*.apk' -type f | head -1)"
+          test -f "$APK"
+          EXPECTED="$(grep 'app-release.apk' emulator_input/artifact_sha256.txt | awk '{print $1}')"
+          test -n "$EXPECTED"
+          echo "$EXPECTED  $APK" | sha256sum -c -
+          echo "APK=$APK" >> "$GITHUB_ENV"
+          echo "APK_SHA256=$EXPECTED" >> "$GITHUB_ENV"
+      - name: Enable KVM access
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Boot API-36 emulator install and launch exact APK
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 36
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          script: |
+            set -euo pipefail
+            adb install -r "$APK" | tee emulator_install.txt
+            adb logcat -c
+            adb shell monkey -p "$PACKAGE_ID" -c android.intent.category.LAUNCHER 1 | tee emulator_monkey.txt
+            sleep 12
+            PID="$(adb shell pidof "$PACKAGE_ID" | tr -d '\r')"
+            test -n "$PID"
+            adb shell dumpsys window windows | grep -E 'mCurrentFocus|mFocusedApp' | tee emulator_focus.txt
+            adb logcat -d '*:E' | tee emulator_errors.txt
+            if grep -E 'FATAL EXCEPTION|Process: com\.musitu\.sovereigninstitution.*has died' emulator_errors.txt; then exit 41; fi
+            adb exec-out screencap -p > emulator_screen.png
+            printf 'EMULATOR_LAUNCH_PASS\npid=%s\napk_sha256=%s\n' "$PID" "$APK_SHA256" | tee emulator_smoke.txt
+      - name: Upload emulator evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: product-frontier-android-emulator-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            emulator_install.txt
+            emulator_monkey.txt
+            emulator_focus.txt
+            emulator_errors.txt
+            emulator_screen.png
+            emulator_smoke.txt
+          if-no-files-found: warn
+          retention-days: 30
