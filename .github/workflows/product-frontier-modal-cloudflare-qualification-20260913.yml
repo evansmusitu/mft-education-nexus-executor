@@ -8,6 +8,7 @@ on:
     paths:
       - 'infrastructure/product-frontier-modal/**'
       - 'infrastructure/product-frontier-cloudflare/**'
+      - 'infrastructure/product-frontier-qualification/**'
       - 'infrastructure/PRODUCT_FRONTIER_RUNTIME_CONTRACT_20260913.md'
       - '.github/workflows/product-frontier-modal-cloudflare-qualification-20260913.yml'
 
@@ -78,11 +79,15 @@ jobs:
         run: |
           set -euo pipefail
           IDENTITY_KEY_HEX="$(printf 'mft-product-frontier-identity-v1:%s' "$NEXUS_EDGE_SHARED_SECRET" | sha256sum | awk '{print $1}')"
+          QA_PASSWORD="$(printf 'mft-product-frontier-qa-user-v1:%s' "$NEXUS_EDGE_SHARED_SECRET" | sha256sum | awk '{print $1}')"
+          echo "::add-mask::${QA_PASSWORD}"
+          echo "MFT_QA_PASSWORD=${QA_PASSWORD}" >> "$GITHUB_ENV"
           modal secret create mft-product-frontier-runtime-secrets \
             "MFT_EDGE_ORIGIN_SECRET=${NEXUS_EDGE_SHARED_SECRET}" \
             "MFT_IDENTITY_KEY_HEX=${IDENTITY_KEY_HEX}" \
+            "MFT_QUALIFICATION_BOOTSTRAP=1" \
             --force
-          unset IDENTITY_KEY_HEX
+          unset IDENTITY_KEY_HEX QA_PASSWORD
 
       - name: Deploy exact runtime to Modal
         shell: bash
@@ -98,10 +103,12 @@ jobs:
           print(f'MFT_MODAL_ORIGIN={url.rstrip("/")}')
           PY
 
-      - name: Verify Modal origin before edge deployment
+      - name: Verify Modal origin and direct-origin boundary
         shell: bash
         run: |
           set -euo pipefail
+          DIRECT_STATUS="$(curl --silent --show-error -o modal_direct_unauthorized.json -w '%{http_code}' "${MFT_MODAL_ORIGIN}/_mft/runtime/health")"
+          test "$DIRECT_STATUS" = '403'
           curl --fail --silent --show-error \
             -H "x-mft-origin-secret: ${NEXUS_EDGE_SHARED_SECRET}" \
             "${MFT_MODAL_ORIGIN}/_mft/runtime/health" > modal_health.json
@@ -112,9 +119,47 @@ jobs:
           assert h['runtime_source_sha256']==os.environ['RUNTIME_SOURCE_SHA256']
           assert h['parent_overlay_sha256']==os.environ['PARENT_OVERLAY_SHA256']
           assert h['modal_max_containers']==1
+          assert h['qualification_fixture'] is True
           assert h['promotion_effect']=='NONE'
           print('modal_exact_runtime_health=PASS')
           PY
+
+      - name: Run governed workflow on Modal before container replacement
+        shell: bash
+        env:
+          QUALIFICATION_BASE_URL: ${{ env.MFT_MODAL_ORIGIN }}
+          MFT_ORIGIN_SECRET: ${{ secrets.NEXUS_EDGE_SHARED_SECRET }}
+        run: |
+          set -euo pipefail
+          python infrastructure/product-frontier-qualification/remote_probe.py \
+            pre modal_probe_state.json modal_probe_pre.json
+
+      - name: Replace Modal container without changing code
+        shell: bash
+        run: |
+          set -euo pipefail
+          modal app rollover mft-product-frontier-runtime --strategy recreate
+          ok=0
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent --show-error \
+              -H "x-mft-origin-secret: ${NEXUS_EDGE_SHARED_SECRET}" \
+              "${MFT_MODAL_ORIGIN}/_mft/runtime/health" > modal_health_after_rollover.json; then
+              ok=1
+              break
+            fi
+            sleep 2
+          done
+          test "$ok" = '1'
+
+      - name: Prove state survives Modal container replacement then rollback
+        shell: bash
+        env:
+          QUALIFICATION_BASE_URL: ${{ env.MFT_MODAL_ORIGIN }}
+          MFT_ORIGIN_SECRET: ${{ secrets.NEXUS_EDGE_SHARED_SECRET }}
+        run: |
+          set -euo pipefail
+          python infrastructure/product-frontier-qualification/remote_probe.py \
+            post modal_probe_state.json modal_probe_post.json
 
       - name: Bind verified Modal origin into temporary Wrangler config
         shell: bash
@@ -162,9 +207,21 @@ jobs:
           assert h['status']=='ok'
           assert h['origin']['runtime_source_sha256']==os.environ['RUNTIME_SOURCE_SHA256']
           assert h['origin']['parent_overlay_sha256']==os.environ['PARENT_OVERLAY_SHA256']
+          assert h['origin']['modal_max_containers']==1
           assert h['promotion_effect']=='NONE'
           print('cloudflare_modal_exact_runtime_health=PASS')
           PY
+
+      - name: Run governed workflow end-to-end through Cloudflare
+        shell: bash
+        env:
+          QUALIFICATION_BASE_URL: ${{ env.MFT_EDGE_URL }}
+        run: |
+          set -euo pipefail
+          python infrastructure/product-frontier-qualification/remote_probe.py \
+            pre edge_probe_state.json edge_probe_pre.json
+          python infrastructure/product-frontier-qualification/remote_probe.py \
+            post edge_probe_state.json edge_probe_post.json
 
       - name: Seal qualification evidence
         if: always()
@@ -172,18 +229,24 @@ jobs:
         run: |
           python - <<'PY'
           import hashlib, json, os, pathlib, time
+          names=[
+            'modal_deploy.txt','modal_direct_unauthorized.json','modal_health.json',
+            'modal_health_after_rollover.json','modal_probe_pre.json','modal_probe_post.json',
+            'edge_health.json','edge_probe_pre.json','edge_probe_post.json'
+          ]
           files=[]
-          for name in ['modal_deploy.txt','modal_health.json','edge_health.json']:
+          for name in names:
               p=pathlib.Path(name)
               if p.exists():
                   files.append({'path':name,'sha256':hashlib.sha256(p.read_bytes()).hexdigest(),'bytes':p.stat().st_size})
           report={
-              'schema':'mft.product_frontier.remote_qualification.v1',
+              'schema':'mft.product_frontier.remote_qualification.v2',
               'recorded_at_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),
               'runtime_source_sha256':os.environ['RUNTIME_SOURCE_SHA256'],
               'parent_overlay_sha256':os.environ['PARENT_OVERLAY_SHA256'],
               'modal_origin':os.environ.get('MFT_MODAL_ORIGIN'),
               'cloudflare_edge':os.environ.get('MFT_EDGE_URL'),
+              'modal_container_replacement_required':True,
               'promotion_effect':'NONE',
               'files':files,
           }
@@ -198,7 +261,13 @@ jobs:
           path: |
             qualification_evidence.json
             modal_deploy.txt
+            modal_direct_unauthorized.json
             modal_health.json
+            modal_health_after_rollover.json
+            modal_probe_pre.json
+            modal_probe_post.json
             edge_health.json
+            edge_probe_pre.json
+            edge_probe_post.json
           if-no-files-found: warn
           retention-days: 30
