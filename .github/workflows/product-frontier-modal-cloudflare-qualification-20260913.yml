@@ -52,8 +52,7 @@ jobs:
           import hashlib, json, os, pathlib, zipfile
           p = pathlib.Path(os.environ['RUNTIME_SOURCE'])
           with zipfile.ZipFile(p) as z:
-              bad = z.testzip()
-              assert bad is None, bad
+              assert z.testzip() is None
               m = json.loads(z.read('RUNTIME_SOURCE_MANIFEST.json'))
               assert m['parent_overlay_sha256'] == os.environ['PARENT_OVERLAY_SHA256']
               assert len(m['files']) == 17
@@ -126,11 +125,10 @@ jobs:
 
       - name: Run governed workflow on Modal before container replacement
         shell: bash
-        env:
-          QUALIFICATION_BASE_URL: ${{ env.MFT_MODAL_ORIGIN }}
-          MFT_ORIGIN_SECRET: ${{ secrets.NEXUS_EDGE_SHARED_SECRET }}
         run: |
           set -euo pipefail
+          QUALIFICATION_BASE_URL="$MFT_MODAL_ORIGIN" \
+          MFT_ORIGIN_SECRET="$NEXUS_EDGE_SHARED_SECRET" \
           python infrastructure/product-frontier-qualification/remote_probe.py \
             pre modal_probe_state.json modal_probe_pre.json
 
@@ -153,11 +151,10 @@ jobs:
 
       - name: Prove state survives Modal container replacement then rollback
         shell: bash
-        env:
-          QUALIFICATION_BASE_URL: ${{ env.MFT_MODAL_ORIGIN }}
-          MFT_ORIGIN_SECRET: ${{ secrets.NEXUS_EDGE_SHARED_SECRET }}
         run: |
           set -euo pipefail
+          QUALIFICATION_BASE_URL="$MFT_MODAL_ORIGIN" \
+          MFT_ORIGIN_SECRET="$NEXUS_EDGE_SHARED_SECRET" \
           python infrastructure/product-frontier-qualification/remote_probe.py \
             post modal_probe_state.json modal_probe_post.json
 
@@ -214,12 +211,12 @@ jobs:
 
       - name: Run governed workflow end-to-end through Cloudflare
         shell: bash
-        env:
-          QUALIFICATION_BASE_URL: ${{ env.MFT_EDGE_URL }}
         run: |
           set -euo pipefail
+          QUALIFICATION_BASE_URL="$MFT_EDGE_URL" \
           python infrastructure/product-frontier-qualification/remote_probe.py \
             pre edge_probe_state.json edge_probe_pre.json
+          QUALIFICATION_BASE_URL="$MFT_EDGE_URL" \
           python infrastructure/product-frontier-qualification/remote_probe.py \
             post edge_probe_state.json edge_probe_post.json
 
