@@ -1,0 +1,191 @@
+name: Axiom Phase14 Encrypted Failure Isolation 20260913
+on:
+  push:
+    branches:
+      - tmp/axiom-phase13-14-candidate-measurement-20260913-1608
+    paths:
+      - .github/workflows/axiom-phase14-encrypted-failure-isolation-20260913.yml
+permissions:
+  contents: write
+jobs:
+  isolate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - name: Setup patch-pinned Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12.14'
+      - name: Prepare one-use X25519 diagnostic transport key
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check 'cryptography==45.0.6'
+          python - <<'PY'
+          import base64
+          from pathlib import Path
+          from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+          from cryptography.hazmat.primitives.serialization import Encoding, PrivateFormat, PublicFormat, NoEncryption
+          priv=X25519PrivateKey.generate()
+          Path('/tmp/axiom-p14diag-private.bin').write_bytes(priv.private_bytes(Encoding.Raw,PrivateFormat.Raw,NoEncryption()))
+          Path('/tmp/axiom-p14diag-pubkey.txt').write_text(base64.b64encode(priv.public_key().public_bytes(Encoding.Raw,PublicFormat.Raw)).decode()+'\n')
+          PY
+          CONTENT=$(base64 -w0 /tmp/axiom-p14diag-pubkey.txt)
+          BODY=$(jq -nc --arg message 'ephemeral: publish one-use Axiom Phase14 diagnostic key' --arg content "$CONTENT" --arg branch "$GITHUB_REF_NAME" '{message:$message,content:$content,branch:$branch}')
+          curl -fsS -X PUT -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' -d "$BODY" "https://api.github.com/repos/$GITHUB_REPOSITORY/contents/ephemeral/axiom-phase14-diagnostic-pubkey.txt" >/dev/null
+          echo 'AXIOM_PHASE14_DIAGNOSTIC_EPHEMERAL_PUBKEY_PUBLISHED'
+      - name: Wait for encrypted diagnostic handoff
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          API="https://api.github.com/repos/$GITHUB_REPOSITORY/contents/ephemeral/axiom-phase14-diagnostic-handoff.json?ref=$GITHUB_REF_NAME"
+          for i in $(seq 1 240); do
+            CODE=$(curl -sS -o /tmp/p14diag-api.json -w '%{http_code}' -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "$API" || true)
+            if [ "$CODE" = 200 ]; then
+              jq -r '.content' /tmp/p14diag-api.json | tr -d '\n' | base64 -d >/tmp/p14diag-handoff.json
+              echo 'AXIOM_PHASE14_DIAGNOSTIC_HANDOFF_RECEIVED'
+              exit 0
+            fi
+            sleep 5
+          done
+          exit 1
+      - name: Decrypt handoff and verified candidate payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import base64,json
+          from pathlib import Path
+          from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey,X25519PublicKey
+          from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+          from cryptography.hazmat.primitives import hashes
+          from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+          h=json.loads(Path('/tmp/p14diag-handoff.json').read_text())
+          priv=X25519PrivateKey.from_private_bytes(Path('/tmp/axiom-p14diag-private.bin').read_bytes())
+          peer=X25519PublicKey.from_public_bytes(base64.b64decode(h['ephemeral_public_key_b64']))
+          key=HKDF(algorithm=hashes.SHA256(),length=32,salt=None,info=b'axiom-phase14-diagnostic-dropbox-handoff-v1').derive(priv.exchange(peer))
+          Path('/tmp/p14diag-download.json').write_bytes(AESGCM(key).decrypt(base64.b64decode(h['nonce_b64']),base64.b64decode(h['ciphertext_b64']),b'axiom-phase14-diagnostic-handoff'))
+          PY
+          URL=$(jq -r '.download_url' /tmp/p14diag-download.json)
+          curl --fail --silent --show-error --location "$URL" -o /tmp/p14diag-transport.enc
+          test "$(sha256sum /tmp/p14diag-transport.enc | awk '{print $1}')" = "$(jq -r '.encrypted_sha256' /tmp/p14diag-download.json)"
+          python - <<'PY'
+          import base64,json,hashlib
+          from pathlib import Path
+          from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+          m=json.loads(Path('/tmp/p14diag-download.json').read_text()); raw=Path('/tmp/p14diag-transport.enc').read_bytes()
+          assert raw[:10]==b'AXIOMCAND1'
+          plain=AESGCM(base64.b64decode(m['payload_key_b64'])).decrypt(raw[10:22],raw[22:],b'MUSITU_AXIOM_PHASE13_PHASE14_CANDIDATE_TRANSPORT')
+          assert hashlib.sha256(plain).hexdigest()==m['plaintext_sha256']
+          Path('/tmp/p14diag.tar.gz').write_bytes(plain)
+          PY
+          mkdir -p /tmp/p14diag-payload && tar -xzf /tmp/p14diag.tar.gz -C /tmp/p14diag-payload
+          B=/tmp/p14diag-payload/MUSITU_AXIOM_FRONTIER_V5_PHASE13_PHASE14_WIP_CONTINUATION_20260913.bundle.bin
+          test "$(stat -c%s "$B")" = 7888037
+          test "$(sha256sum "$B" | awk '{print $1}')" = 6ec5632f9abc86d2a61cdcae745335cfe8c603e36325e15b8ddaff533dccf72d
+          git init -q /tmp/p14diag-repo
+          cd /tmp/p14diag-repo
+          git fetch -q "$B" 'refs/heads/wip/axiom-v5-interface-phase14-pwa-native-20260913:refs/heads/wip-source'
+          git checkout -q e88a14e12b68fffb95e2dff59493c2ef15e11d11
+          test "$(git rev-parse HEAD^{tree})" = 1b77a4e79f4dcbc31efd12ebe093b1a076f5c51c
+          echo 'AXIOM_PHASE14_DIAGNOSTIC_EXACT_SOURCE_VERIFIED'
+      - name: Install exact locked stack
+        shell: bash
+        working-directory: /tmp/p14diag-repo
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ffmpeg espeak-ng tesseract-ocr xvfb xdotool python3-tk scrot unzip ca-certificates curl
+          python -m pip install 'pip==26.2.1'
+          python -m pip install -r frontier_v5/requirements/fullstack.lock.txt
+          python -m pip check
+          python -m playwright install --with-deps chromium
+          PYTHONPATH=. python frontier_v5/scripts/verify_supply_chain.py --output /tmp/p14diag-supply-chain.json
+          curl --fail --silent --show-error --location --retry 3 --retry-all-errors https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip -o /tmp/p14diag-vosk.zip
+          echo '30f26242c4eb449f948e42cb302dd7a686cb29a3423a8367f99ff41780942498  /tmp/p14diag-vosk.zip' | sha256sum --check --strict
+          mkdir -p /tmp/p14diag-vosk && unzip -q /tmp/p14diag-vosk.zip -d /tmp/p14diag-vosk
+      - name: Isolate Phase14 runtime gate
+        id: runtime
+        continue-on-error: true
+        shell: bash
+        working-directory: /tmp/p14diag-repo
+        env:
+          AXIOM_PHASE8_SECURITY_ARTIFACT_DIR: /tmp/p14diag-p8-sec
+          AXIOM_PHASE9_SECURITY_ARTIFACT_DIR: /tmp/p14diag-p9-sec
+          AXIOM_PHASE10_SECURITY_ARTIFACT_DIR: /tmp/p14diag-p10-sec
+          AXIOM_PHASE11_SECURITY_ARTIFACT_DIR: /tmp/p14diag-p11-sec
+          AXIOM_PHASE12_SECURITY_ARTIFACT_DIR: /tmp/p14diag-p12-sec
+          AXIOM_PHASE13_SECURITY_ARTIFACT_DIR: /tmp/p14diag-p13-sec
+          AXIOM_PHASE14_SECURITY_ARTIFACT_DIR: /tmp/p14diag-p14-sec
+        run: |
+          set -o pipefail
+          PYTHONPATH=. python frontier_v5/scripts/run_phase14_regression_gate.py 2>&1 | tee /tmp/p14diag-runtime.log
+      - name: Isolate Phase14 specific contract and security tests
+        id: contract
+        continue-on-error: true
+        shell: bash
+        working-directory: /tmp/p14diag-repo
+        env:
+          AXIOM_PHASE14_SECURITY_ARTIFACT_DIR: /tmp/p14diag-p14-sec-specific
+        run: |
+          set -o pipefail
+          PYTHONPATH=. python frontier_v5/tests/test_pwa_resilience.py 2>&1 | tee /tmp/p14diag-contract.log
+          PYTHONPATH=. python axiom_interface/tests/test_pwa_phase14.py 2>&1 | tee -a /tmp/p14diag-contract.log
+          PYTHONPATH=. python frontier_v5/scripts/run_phase14_security_gate.py 2>&1 | tee -a /tmp/p14diag-contract.log
+      - name: Isolate inherited Phase13 browser gate on Phase14 tree
+        id: inherited_browser
+        continue-on-error: true
+        shell: bash
+        working-directory: /tmp/p14diag-repo
+        env:
+          AXIOM_VOSK_MODEL_DIR: /tmp/p14diag-vosk/vosk-model-small-en-us-0.15
+          AXIOM_VOSK_MODEL_SHA256: 30f26242c4eb449f948e42cb302dd7a686cb29a3423a8367f99ff41780942498
+        run: |
+          set -o pipefail
+          PYTHONPATH=. python frontier_v5/scripts/run_phase13_browser_regression_gate.py 2>&1 | tee /tmp/p14diag-inherited-browser.log
+      - name: Isolate Phase14 browser candidate
+        id: p14_browser
+        continue-on-error: true
+        shell: bash
+        working-directory: /tmp/p14diag-repo
+        env:
+          AXIOM_VOSK_MODEL_DIR: /tmp/p14diag-vosk/vosk-model-small-en-us-0.15
+          AXIOM_VOSK_MODEL_SHA256: 30f26242c4eb449f948e42cb302dd7a686cb29a3423a8367f99ff41780942498
+          AXIOM_PHASE14_ARTIFACT_DIR: /tmp/p14diag-browser
+        run: |
+          set -o pipefail
+          PYTHONPATH=. python axiom_interface/tests/run_browser_phase14.py 2>&1 | tee /tmp/p14diag-browser.log
+      - name: Publish diagnostic status only
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUNTIME: ${{ steps.runtime.outcome }}
+          CONTRACT: ${{ steps.contract.outcome }}
+          INHERITED_BROWSER: ${{ steps.inherited_browser.outcome }}
+          P14_BROWSER: ${{ steps.p14_browser.outcome }}
+        run: |
+          set -euo pipefail
+          jq -nc --arg schema musitu.axiom.phase14.external-diagnostic.v1 --arg run "$GITHUB_RUN_ID" --arg runtime "$RUNTIME" --arg contract "$CONTRACT" --arg inherited_browser "$INHERITED_BROWSER" --arg p14_browser "$P14_BROWSER" '{schema:$schema,run_id:($run|tonumber),authority_effect:"DIAGNOSTIC_ONLY_NO_PROMOTION_AUTHORITY",runtime_gate:$runtime,phase14_specific_contract_security:$contract,inherited_phase13_browser_on_phase14_tree:$inherited_browser,phase14_browser_script:$p14_browser}' >/tmp/p14diag-summary.json
+          cat /tmp/p14diag-summary.json
+          CONTENT=$(base64 -w0 /tmp/p14diag-summary.json)
+          BODY=$(jq -nc --arg message 'diag: publish Axiom Phase14 external failure isolation status' --arg content "$CONTENT" --arg branch "$GITHUB_REF_NAME" '{message:$message,content:$content,branch:$branch}')
+          curl -fsS -X PUT -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' -d "$BODY" "https://api.github.com/repos/$GITHUB_REPOSITORY/contents/ephemeral/axiom-phase14-diagnostic-result.json" >/dev/null
+      - name: Fail closed if any diagnostic component failed
+        if: always()
+        shell: bash
+        env:
+          RUNTIME: ${{ steps.runtime.outcome }}
+          CONTRACT: ${{ steps.contract.outcome }}
+          INHERITED_BROWSER: ${{ steps.inherited_browser.outcome }}
+          P14_BROWSER: ${{ steps.p14_browser.outcome }}
+        run: |
+          test "$RUNTIME" = success && test "$CONTRACT" = success && test "$INHERITED_BROWSER" = success && test "$P14_BROWSER" = success
+      - name: Destroy diagnostic plaintext and keys
+        if: always()
+        shell: bash
+        run: rm -rf /tmp/p14diag-repo /tmp/p14diag-payload /tmp/p14diag.tar.gz /tmp/p14diag-transport.enc /tmp/p14diag-download.json /tmp/p14diag-handoff.json /tmp/axiom-p14diag-private.bin /tmp/axiom-p14diag-pubkey.txt /tmp/p14diag-vosk /tmp/p14diag-vosk.zip
