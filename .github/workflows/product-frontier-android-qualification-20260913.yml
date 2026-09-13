@@ -5,8 +5,7 @@ on:
     paths: ['product_frontier_android_20260913/**','.github/workflows/product-frontier-android-qualification-20260913.yml']
 permissions: {contents: read}
 env:
-  INPUT_ZIP: product_frontier_android_20260913/input.zip
-  TRANSPORT_SHA256: 0380b1c31b3f7137a0dc1a4f9483551a580a93494682a9489b0f5e2c7b04dc1e
+  SOURCE_ZIP_SHA256: 14ba42284e284f902adef81e1049c021a67cb053c99db9db47b97d0b1706edb3
   SOURCE_MANIFEST_SHA256: 2f0d1f2c9724e9704bfe122c270412a49c5aebc63984d49e32850c6d56f4666c
   ANDROID_DIR: android_qualification_work/MFT_SOVEREIGN_INSTITUTION_ANDROID_FRONTIER_HARDENED_SOURCE
   PACKAGE_ID: com.musitu.sovereigninstitution
@@ -19,14 +18,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: {ref: product-frontier-android-20260913}
-      - name: Repair transport and verify exact source files
+      - name: Reassemble and verify exact sealed source
         run: |
           set -euo pipefail
-          echo "${TRANSPORT_SHA256}  ${INPUT_ZIP}" | sha256sum -c -
-          test "$(stat -c%s "$INPUT_ZIP")" = 10321
-          printf '\0\0' >> "$INPUT_ZIP"
+          cat product_frontier_android_20260913/sealed_v2.b64.{1,2,3,4} | base64 -d > /tmp/sealed.zip
+          echo "${SOURCE_ZIP_SHA256}  /tmp/sealed.zip" | sha256sum -c -
           rm -rf android_qualification_work && mkdir android_qualification_work
-          unzip -q "$INPUT_ZIP" -d android_qualification_work
+          unzip -q /tmp/sealed.zip -d android_qualification_work
           cd "$ANDROID_DIR"
           echo "${SOURCE_MANIFEST_SHA256}  SHA256SUMS.txt" | sha256sum -c -
           sha256sum -c SHA256SUMS.txt
@@ -45,8 +43,7 @@ jobs:
       - name: Build release APK and AAB
         run: |
           set -euo pipefail
-          cd "$ANDROID_DIR/android"
-          chmod +x gradlew
+          cd "$ANDROID_DIR/android"; chmod +x gradlew
           ./gradlew --no-daemon clean lintRelease assembleRelease bundleRelease
       - name: Inspect artifacts
         run: |
