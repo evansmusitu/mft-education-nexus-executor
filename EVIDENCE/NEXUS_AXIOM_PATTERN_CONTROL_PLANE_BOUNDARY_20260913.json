@@ -1,0 +1,67 @@
+{
+  "schema": "mft.education_nexus.deployment.control_plane_boundary.v1",
+  "recorded_utc": "2026-09-13T09:38:00Z",
+  "architecture": {
+    "control_plane": "GitHub Actions",
+    "edge": "Cloudflare Workers",
+    "compute": "Modal private ASGI with proxy auth",
+    "state": "Neon PostgreSQL",
+    "revenue": "Paynow",
+    "axiom_dependency": false,
+    "axiom_modified": false
+  },
+  "canonical_source": {
+    "zip_sha256": "3fb025b05128e36fa25a5ae298a56cb7fd9d8bba91787b0003436a0069738b64",
+    "zip_bytes": 8526465,
+    "app_py_sha256": "fc661f10e51c499124bf1705ee162e8f23f55507feff6bb659e7b4f3af018f10",
+    "requirements_lock_sha256": "6f07764247efd93d4682bf3372e63c5efd09e89603cbe11326f68c73247a7de3"
+  },
+  "executor_repository": {
+    "repository": "evansmusitu/mft-education-nexus-executor",
+    "visibility_observed": "private",
+    "live_deploy_commit": "5a7ef8985c53af6210f2eeb0bfcf0ef406378dab",
+    "live_deploy_run_id": 34749825027,
+    "live_deploy_job_id": 103704213190,
+    "job_steps_observed": null,
+    "conclusion": "failure_before_step_execution"
+  },
+  "public_control": {
+    "repository": "evansmusitu/mft-axiom-build",
+    "visibility_observed": "public",
+    "comparison_run_id": 34749817923,
+    "comparison_job_id": 103704186857,
+    "set_up_job": "success",
+    "checkout": "success",
+    "runner_executing_steps": true
+  },
+  "neon": {
+    "project": "quiet-thunder-10380542",
+    "branch": "br-dry-paper-ay0ie7lf",
+    "branch_name": "commerce-axiom-mirror-20260913",
+    "runtime_role": "nexus_live_runtime",
+    "runtime_role_owner_credential_used": false,
+    "runtime_role_grants": [
+      "USAGE,CREATE ON SCHEMA public",
+      "SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA public",
+      "USAGE,SELECT,UPDATE ON ALL SEQUENCES IN SCHEMA public",
+      "matching default privileges"
+    ]
+  },
+  "provider_secret_presence": "UNVERIFIED_BECAUSE_RUNNER_DID_NOT_START",
+  "required_repository_secrets_checked_by_workflow": [
+    "MODAL_TOKEN_ID",
+    "MODAL_TOKEN_SECRET",
+    "NEXUS_NEON_DATABASE_URL",
+    "NEXUS_R2_ACCESS_KEY_ID",
+    "NEXUS_R2_SECRET_ACCESS_KEY",
+    "PAYNOW_INTEGRATION_KEY",
+    "REVENUE_ADMIN_TOKEN",
+    "CLOUDFLARE_API_TOKEN"
+  ],
+  "next_gate": {
+    "required_account_action": "change evansmusitu/mft-education-nexus-executor visibility from private to public",
+    "then": "rerun GitHub Actions run 34749825027 / job 103704213190",
+    "promotion_credit": false,
+    "production_activation": false
+  }
+}
