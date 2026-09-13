@@ -25,6 +25,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: product-frontier-android-20260913
 
       - name: Verify and extract exact hardened source seal
         shell: bash
@@ -115,6 +117,8 @@ jobs:
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: product-frontier-android-20260913
 
       - name: Verify and extract exact hardened source seal
         shell: bash
