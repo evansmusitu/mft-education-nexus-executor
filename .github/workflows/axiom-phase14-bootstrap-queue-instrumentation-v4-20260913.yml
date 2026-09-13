@@ -170,7 +170,7 @@ jobs:
                   ])
                   seen_queue+=1
           assert seen_page==1, seen_page
-          assert seen_boot==1, seen_boot
+          assert seen_boot==2, seen_boot
           assert seen_queue==1, seen_queue
           Path('/tmp/run_browser_phase14_instrumented_v4.py').write_text(''.join(out))
           assert src.read_text()==original
