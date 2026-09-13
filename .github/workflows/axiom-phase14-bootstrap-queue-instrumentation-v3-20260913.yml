@@ -1,0 +1,151 @@
+name: Axiom Phase14 Bootstrap Queue Instrumentation V3 20260913
+
+on:
+  push:
+    branches:
+      - tmp/axiom-phase14-pw161-diagnostic-20260913-1653
+    paths:
+      - .github/workflows/axiom-phase14-bootstrap-queue-instrumentation-v3-20260913.yml
+
+permissions:
+  contents: write
+
+jobs:
+  instrument:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12.14'
+
+      - name: Publish one-use key
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check 'cryptography==45.0.6'
+          python - <<'PY'
+          import base64
+          from pathlib import Path
+          from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+          from cryptography.hazmat.primitives.serialization import Encoding,PrivateFormat,PublicFormat,NoEncryption
+          p=X25519PrivateKey.generate()
+          Path('/tmp/p14i3-private').write_bytes(p.private_bytes(Encoding.Raw,PrivateFormat.Raw,NoEncryption()))
+          Path('/tmp/p14i3-pub').write_text(base64.b64encode(p.public_key().public_bytes(Encoding.Raw,PublicFormat.Raw)).decode()+'\n')
+          PY
+          CONTENT=$(base64 -w0 /tmp/p14i3-pub)
+          BODY=$(jq -nc --arg message 'ephemeral: publish Phase14 instrument v3 key' --arg content "$CONTENT" --arg branch "$GITHUB_REF_NAME" '{message:$message,content:$content,branch:$branch}')
+          curl -fsS -X PUT -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' -d "$BODY" "https://api.github.com/repos/$GITHUB_REPOSITORY/contents/ephemeral/axiom-phase14-instrument-v3-pubkey.txt" >/dev/null
+
+      - name: Wait for encrypted handoff
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          API="https://api.github.com/repos/$GITHUB_REPOSITORY/contents/ephemeral/axiom-phase14-instrument-v3-handoff.json?ref=$GITHUB_REF_NAME"
+          for i in $(seq 1 180); do
+            C=$(curl -sS -o /tmp/p14i3-api -w '%{http_code}' -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' "$API" || true)
+            if [ "$C" = 200 ]; then jq -r '.content' /tmp/p14i3-api | tr -d '\n' | base64 -d >/tmp/p14i3-handoff; exit 0; fi
+            sleep 3
+          done
+          exit 1
+
+      - name: Decrypt and verify exact candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import base64,json
+          from pathlib import Path
+          from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey,X25519PublicKey
+          from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+          from cryptography.hazmat.primitives import hashes
+          from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+          h=json.loads(Path('/tmp/p14i3-handoff').read_text())
+          p=X25519PrivateKey.from_private_bytes(Path('/tmp/p14i3-private').read_bytes())
+          q=X25519PublicKey.from_public_bytes(base64.b64decode(h['ephemeral_public_key_b64']))
+          k=HKDF(algorithm=hashes.SHA256(),length=32,salt=None,info=b'axiom-phase14-instrument-v3').derive(p.exchange(q))
+          Path('/tmp/p14i3-download').write_bytes(AESGCM(k).decrypt(base64.b64decode(h['nonce_b64']),base64.b64decode(h['ciphertext_b64']),b'axiom-phase14-instrument-v3'))
+          PY
+          URL=$(jq -r '.download_url' /tmp/p14i3-download)
+          curl -fsSL "$URL" -o /tmp/p14i3.enc
+          test "$(stat -c%s /tmp/p14i3.enc)" = 7818986
+          test "$(sha256sum /tmp/p14i3.enc | awk '{print $1}')" = da585ec63b9aa5733300934964d6a272351fb7a256c3dffd08cc410da92784b8
+          python - <<'PY'
+          import base64,json,hashlib
+          from pathlib import Path
+          from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+          m=json.loads(Path('/tmp/p14i3-download').read_text()); r=Path('/tmp/p14i3.enc').read_bytes(); assert r[:10]==b'AXIOMCAND1'
+          p=AESGCM(base64.b64decode(m['payload_key_b64'])).decrypt(r[10:22],r[22:],b'MUSITU_AXIOM_PHASE13_PHASE14_CANDIDATE_TRANSPORT')
+          assert len(p)==7818948 and hashlib.sha256(p).hexdigest()=='fe9bdcc50c2dba41e927424180349f077e56ba92e20462d2ab38511ea53b76f1'
+          Path('/tmp/p14i3.tar.gz').write_bytes(p)
+          PY
+          mkdir /tmp/p14i3-payload && tar -xzf /tmp/p14i3.tar.gz -C /tmp/p14i3-payload
+          B=/tmp/p14i3-payload/MUSITU_AXIOM_FRONTIER_V5_PHASE13_PHASE14_WIP_CONTINUATION_20260913.bundle.bin
+          test "$(stat -c%s "$B")" = 7888037
+          test "$(sha256sum "$B"|awk '{print $1}')" = 6ec5632f9abc86d2a61cdcae745335cfe8c603e36325e15b8ddaff533dccf72d
+          git init -q /tmp/p14i3-repo && cd /tmp/p14i3-repo
+          git fetch -q "$B" 'refs/heads/wip/axiom-v5-interface-phase14-pwa-native-20260913:refs/heads/wip-source'
+          git checkout -q e88a14e12b68fffb95e2dff59493c2ef15e11d11
+          test "$(git rev-parse HEAD^{tree})" = 1b77a4e79f4dcbc31efd12ebe093b1a076f5c51c
+          test "$(sha256sum axiom_interface/tests/run_browser_phase14.py|awk '{print $1}')" = 1dd1974296cb9039a4e102f94c97ffaa50a54877c75539d7a4038e10aff2e981
+          echo AXIOM_PHASE14_INSTRUMENT_V3_EXACT_CANDIDATE_VERIFIED
+
+      - name: Install Playwright 1.61
+        working-directory: /tmp/p14i3-repo
+        run: |
+          python -m pip install --disable-pip-version-check 'playwright==1.61.0'
+          python -m playwright install --with-deps chromium
+
+      - name: Build temporary bootstrap and queue instrumented copy
+        working-directory: /tmp/p14i3-repo
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          src=Path('axiom_interface/tests/run_browser_phase14.py'); original=src.read_text()
+
+          page_needle='            page = context.new_page()\n'
+          page_insert='''            page = context.new_page()\n            diagnostic_console=[]\n            diagnostic_pageerrors=[]\n            diagnostic_requestfailed=[]\n            diagnostic_script_responses=[]\n            page.on("console", lambda msg: diagnostic_console.append({"type":msg.type,"text":msg.text}))\n            page.on("pageerror", lambda exc: diagnostic_pageerrors.append(str(exc)))\n            page.on("requestfailed", lambda req: diagnostic_requestfailed.append({"url":req.url,"failure":req.failure}))\n            page.on("response", lambda resp: diagnostic_script_responses.append({"url":resp.url,"status":resp.status}) if (resp.request.resource_type in ("script","document") or ".js" in resp.url or ".mjs" in resp.url) else None)\n'''
+          assert page_needle in original
+          instrumented=original.replace(page_needle,page_insert,1)
+
+          boot_needle='            page.wait_for_function("()=>Boolean(window.AxiomPwaHardeningBootstrap)")\n'
+          boot_insert='''            try:\n                page.wait_for_function("()=>Boolean(window.AxiomPwaHardeningBootstrap)")\n                print("AXIOM_P14_BOOTSTRAP_WAIT=PASS",flush=True)\n            except Exception as diagnostic_bootstrap_exc:\n                import json as _json\n                try:\n                    state=page.evaluate("()=>({url:location.href,title:document.title,readyState:document.readyState,bootstrap:Boolean(window.AxiomPwaHardeningBootstrap),hardening:Boolean(window.AxiomPwaHardening),scripts:[...document.scripts].map(s=>({src:s.src,type:s.type}))})")\n                except Exception as diagnostic_state_exc:\n                    state={"state_capture_error":type(diagnostic_state_exc).__name__+":"+str(diagnostic_state_exc)}\n                print("AXIOM_P14_BOOTSTRAP_WAIT=FAIL",flush=True)\n                print("AXIOM_P14_BOOTSTRAP_EXCEPTION="+type(diagnostic_bootstrap_exc).__name__+":"+str(diagnostic_bootstrap_exc),flush=True)\n                print("AXIOM_P14_BOOTSTRAP_STATE="+_json.dumps(state,sort_keys=True),flush=True)\n                print("AXIOM_P14_CONSOLE="+_json.dumps(diagnostic_console[-100:],sort_keys=True),flush=True)\n                print("AXIOM_P14_PAGEERRORS="+_json.dumps(diagnostic_pageerrors[-100:],sort_keys=True),flush=True)\n                print("AXIOM_P14_REQUESTFAILED="+_json.dumps(diagnostic_requestfailed[-100:],sort_keys=True),flush=True)\n                print("AXIOM_P14_SCRIPT_RESPONSES="+_json.dumps(diagnostic_script_responses[-100:],sort_keys=True),flush=True)\n                raise\n'''
+          assert boot_needle in instrumented
+          instrumented=instrumented.replace(boot_needle,boot_insert,1)
+
+          queue_needle='            completed = page.evaluate("()=>window.AxiomPwaHardening.queue.listActions()")\n            assert completed[0]["status"] == "COMPLETED_LOCAL"\n'
+          queue_insert='''            completed = page.evaluate("()=>window.AxiomPwaHardening.queue.listActions()")\n            print("AXIOM_P14_ACTION_FROM_REFRESH="+__import__("json").dumps({k:action.get(k) for k in ("action_id","id","type","status","queued_at") if k in action},sort_keys=True),flush=True)\n            print("AXIOM_P14_NAVIGATOR_ONLINE="+__import__("json").dumps(page.evaluate("()=>navigator.onLine")),flush=True)\n            print("AXIOM_P14_ACTION_ROWS="+__import__("json").dumps([{k:r.get(k) for k in ("action_id","id","type","status","queued_at","attempt_count","last_error","completed_at","receipt_id") if k in r} for r in completed],sort_keys=True),flush=True)\n            diagnostic_receipts = page.evaluate("()=>window.AxiomPwaHardening.queue.listReceipts()")\n            print("AXIOM_P14_RECEIPT_ROWS="+__import__("json").dumps([{k:r.get(k) for k in ("receipt_id","action_id","action_type","type","status","created_at","completed_at","external_side_effect") if k in r} for r in diagnostic_receipts],sort_keys=True),flush=True)\n            try:\n                diagnostic_verify=page.evaluate("()=>window.AxiomPwaHardening.queue.verify()")\n                print("AXIOM_P14_QUEUE_VERIFY="+__import__("json").dumps(diagnostic_verify,sort_keys=True),flush=True)\n            except Exception as diagnostic_exc:\n                print("AXIOM_P14_QUEUE_VERIFY_ERROR="+type(diagnostic_exc).__name__+":"+str(diagnostic_exc),flush=True)\n            assert completed[0]["status"] == "COMPLETED_LOCAL"\n'''
+          assert queue_needle in instrumented
+          instrumented=instrumented.replace(queue_needle,queue_insert,1)
+
+          Path('/tmp/run_browser_phase14_instrumented_v3.py').write_text(instrumented)
+          assert src.read_text()==original
+          print('AXIOM_PHASE14_INSTRUMENT_V3_ORIGINAL_UNCHANGED')
+          PY
+
+      - name: Run original semantics with bootstrap and queue diagnostics
+        id: instrument
+        continue-on-error: true
+        working-directory: /tmp/p14i3-repo
+        env:
+          AXIOM_PHASE14_ARTIFACT_DIR: /tmp/p14i3-artifacts
+        run: |
+          PYTHONPATH=. python /tmp/run_browser_phase14_instrumented_v3.py
+
+      - name: Diagnostic authority boundary
+        if: always()
+        env:
+          OUTCOME: ${{ steps.instrument.outcome }}
+        run: |
+          echo "AXIOM_PHASE14_INSTRUMENT_V3_OUTCOME=$OUTCOME"
+          echo AXIOM_PHASE14_INSTRUMENT_V3_AUTHORITY=DIAGNOSTIC_ONLY_NO_PROMOTION_AUTHORITY
+          echo AXIOM_PHASE14_INSTRUMENT_V3_REAL_DEVICE=NOT_RUN
+
+      - name: Cleanup
+        if: always()
+        run: rm -rf /tmp/p14i3* /tmp/run_browser_phase14_instrumented_v3.py
