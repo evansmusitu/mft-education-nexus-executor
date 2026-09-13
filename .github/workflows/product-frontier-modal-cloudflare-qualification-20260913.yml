@@ -56,6 +56,8 @@ jobs:
               m = json.loads(z.read('RUNTIME_SOURCE_MANIFEST.json'))
               assert m['parent_overlay_sha256'] == os.environ['PARENT_OVERLAY_SHA256']
               assert len(m['files']) == 17
+              expected = {row['path'] for row in m['files']} | {'RUNTIME_SOURCE_MANIFEST.json'}
+              assert set(z.namelist()) == expected
               for row in m['files']:
                   data = z.read(row['path'])
                   assert len(data) == int(row['bytes'])
@@ -114,6 +116,18 @@ jobs:
           print('modal_exact_runtime_health=PASS')
           PY
 
+      - name: Bind verified Modal origin into temporary Wrangler config
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${MFT_MODAL_ORIGIN:-}" != ''
+          cat >> infrastructure/product-frontier-cloudflare/wrangler.toml <<EOF
+
+          [vars]
+          MFT_MODAL_ORIGIN = "${MFT_MODAL_ORIGIN}"
+          EOF
+          grep -F 'MFT_MODAL_ORIGIN = "https://' infrastructure/product-frontier-cloudflare/wrangler.toml
+
       - name: Deploy Cloudflare stateless edge
         id: cloudflare
         uses: cloudflare/wrangler-action@v4
@@ -122,7 +136,7 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: infrastructure/product-frontier-cloudflare
           wranglerVersion: '4.131.1'
-          command: deploy --var MFT_MODAL_ORIGIN:${{ env.MFT_MODAL_ORIGIN }}
+          command: deploy
           secrets: |
             MFT_EDGE_ORIGIN_SECRET
         env:
