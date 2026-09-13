@@ -12,7 +12,7 @@ permissions:
 
 env:
   INPUT_ZIP: product_frontier_android_20260913/input.zip
-  SOURCE_ZIP_SHA256: 14ba42284e284f902adef81e1049c021a67cb053c99db9db47b97d0b1706edb3
+  SOURCE_MANIFEST_SHA256: 2f0d1f2c9724e9704bfe122c270412a49c5aebc63984d49e32850c6d56f4666c
   ANDROID_DIR: android_qualification_work/MFT_SOVEREIGN_INSTITUTION_ANDROID_FRONTIER_HARDENED_SOURCE
   PACKAGE_ID: com.musitu.sovereigninstitution
   EXPO_PUBLIC_MFT_API_URL: https://institution.example.invalid
@@ -25,16 +25,19 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: product-frontier-android-20260913
 
-      - name: Verify and extract exact hardened source seal
+      - name: Verify and extract exact hardened source files
         shell: bash
         run: |
           set -euo pipefail
-          echo "${SOURCE_ZIP_SHA256}  ${INPUT_ZIP}" | sha256sum -c -
+          sha256sum "$INPUT_ZIP" | tee transport_zip_sha256.txt
           rm -rf android_qualification_work
           mkdir -p android_qualification_work
           unzip -q "$INPUT_ZIP" -d android_qualification_work
           cd "$ANDROID_DIR"
+          echo "${SOURCE_MANIFEST_SHA256}  SHA256SUMS.txt" | sha256sum -c -
           sha256sum -c SHA256SUMS.txt
 
       - uses: actions/setup-node@v4
@@ -86,10 +89,7 @@ jobs:
           "$AAPT" dump badging "$APK" | tee android_badging.txt
           grep "package: name='${PACKAGE_ID}'" android_badging.txt
           grep "targetSdkVersion:'36'" android_badging.txt
-          if grep -q 'application-debuggable' android_badging.txt; then
-            echo 'release_apk_is_debuggable' >&2
-            exit 31
-          fi
+          if grep -q 'application-debuggable' android_badging.txt; then echo 'release_apk_is_debuggable' >&2; exit 31; fi
           "$APKSIGNER" verify --verbose --print-certs "$APK" | tee apk_signing.txt
           sha256sum "$APK" "$AAB" | tee artifact_sha256.txt
           cp SHA256SUMS.txt source_file_sha256.txt
@@ -105,6 +105,7 @@ jobs:
             android_qualification_work/MFT_SOVEREIGN_INSTITUTION_ANDROID_FRONTIER_HARDENED_SOURCE/apk_signing.txt
             android_qualification_work/MFT_SOVEREIGN_INSTITUTION_ANDROID_FRONTIER_HARDENED_SOURCE/artifact_sha256.txt
             android_qualification_work/MFT_SOVEREIGN_INSTITUTION_ANDROID_FRONTIER_HARDENED_SOURCE/source_file_sha256.txt
+            transport_zip_sha256.txt
           if-no-files-found: error
           retention-days: 30
 
@@ -115,16 +116,18 @@ jobs:
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: product-frontier-android-20260913
 
-      - name: Verify and extract exact hardened source seal
+      - name: Verify and extract exact hardened source files
         shell: bash
         run: |
           set -euo pipefail
-          echo "${SOURCE_ZIP_SHA256}  ${INPUT_ZIP}" | sha256sum -c -
           rm -rf android_qualification_work
           mkdir -p android_qualification_work
           unzip -q "$INPUT_ZIP" -d android_qualification_work
           cd "$ANDROID_DIR"
+          echo "${SOURCE_MANIFEST_SHA256}  SHA256SUMS.txt" | sha256sum -c -
           sha256sum -c SHA256SUMS.txt
 
       - uses: actions/setup-node@v4
@@ -171,9 +174,7 @@ jobs:
             test -n "$PID"
             adb shell dumpsys window windows | grep -E 'mCurrentFocus|mFocusedApp' | tee emulator_focus.txt
             adb logcat -d '*:E' | tee emulator_errors.txt
-            if grep -E 'FATAL EXCEPTION|Process: com\.musitu\.sovereigninstitution.*has died' emulator_errors.txt; then
-              exit 41
-            fi
+            if grep -E 'FATAL EXCEPTION|Process: com\.musitu\.sovereigninstitution.*has died' emulator_errors.txt; then exit 41; fi
             adb exec-out screencap -p > emulator_screen.png
             echo "EMULATOR_LAUNCH_PASS pid=$PID" | tee emulator_smoke.txt
 
