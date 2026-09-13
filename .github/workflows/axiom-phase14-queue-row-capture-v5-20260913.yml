@@ -64,7 +64,7 @@ jobs:
           echo AXIOM_P14_V5_HANDOFF_TIMEOUT
           exit 1
 
-      - name: Decrypt and verify exact minimized Phase14 interface
+      - name: Decrypt delta and reconstruct exact Phase14 candidate
         shell: bash
         run: |
           set -euo pipefail
@@ -76,27 +76,28 @@ jobs:
           from cryptography.hazmat.primitives import hashes
           from cryptography.hazmat.primitives.ciphers.aead import AESGCM
           h=json.loads(Path('/tmp/p14v5-handoff.json').read_text())
-          assert h['schema']=='musitu.axiom.phase14.queue-row-v5.encrypted-mini.v1'
+          assert h['schema']=='musitu.axiom.phase14.queue-row-v5.encrypted-delta.v1'
           priv=X25519PrivateKey.from_private_bytes(Path('/tmp/p14v5-private').read_bytes())
           peer=X25519PublicKey.from_public_bytes(base64.b64decode(h['ephemeral_public_key_b64']))
           key=HKDF(algorithm=hashes.SHA256(),length=32,salt=None,info=b'axiom-phase14-queue-row-v5').derive(priv.exchange(peer))
           plain=AESGCM(key).decrypt(base64.b64decode(h['nonce_b64']),base64.b64decode(h['ciphertext_b64']),b'axiom-phase14-queue-row-v5')
-          assert len(plain)==274727, len(plain)
-          assert hashlib.sha256(plain).hexdigest()=='424baf2a74b8f4320fd298924451aac0cad50ffb25b5b204fb876e5fc9100ead'
-          Path('/tmp/p14v5.zip').write_bytes(plain)
+          assert len(plain)==62732, len(plain)
+          assert hashlib.sha256(plain).hexdigest()=='8a6d977a0e4d09318f6230c34eb00f67725215bb610007c99b55ddfffd920583'
+          Path('/tmp/p14v5-delta.zip').write_bytes(plain)
           PY
-          mkdir /tmp/p14v5
-          unzip -q /tmp/p14v5.zip -d /tmp/p14v5
+          git clone -q https://github.com/evansmusitu/mft-axiom-build.git /tmp/p14v5
           cd /tmp/p14v5
+          git checkout -q cabb5767157afa2f688ef5718eee9452b7d98177
+          test "$(git rev-parse HEAD^{tree})" = 510e24525fae4707eaad1c6e6004b7ce03888645
+          unzip -oq /tmp/p14v5-delta.zip -d /tmp/p14v5
+          git add -A
+          test "$(git write-tree)" = 1b77a4e79f4dcbc31efd12ebe093b1a076f5c51c
           test "$(sha256sum axiom_interface/tests/run_browser_phase14.py | awk '{print $1}')" = 1dd1974296cb9039a4e102f94c97ffaa50a54877c75539d7a4038e10aff2e981
           test "$(sha256sum axiom_interface/pwa_queue.js | awk '{print $1}')" = 72aaeba5045fd0bc0c61c96928367b06d4ef74ca9c35d199b6bf1d50889c447f
           test "$(sha256sum axiom_interface/pwa_runtime.js | awk '{print $1}')" = 5c9bc614f113d31d0b74ba8465ee245d19934651a9213d6440f56086d471ed59
-          test "$(sha256sum axiom_interface/pwa_bootstrap.js | awk '{print $1}')" = 794bf706fcf44b46ee04c9652c32d62dcab81cb541922fe4d51464b4c312bc98
-          test "$(sha256sum axiom_interface/index.html | awk '{print $1}')" = 4e52a11c4513533e210d2d6156e3564cb294226a4cf5f01292b3480488b0ace6
-          test "$(sha256sum axiom_interface/app.js | awk '{print $1}')" = 06a02cf7773a4f0261cf1b1525801514633cef7d71009b84cec2046cdd24297b
-          test "$(sha256sum axiom_interface/manifest.webmanifest | awk '{print $1}')" = 844a69e380f5166a9b1ddd299bab4b738650345a89fb378ed2c90e91ca2ab096
-          test "$(sha256sum axiom_interface/sw.js | awk '{print $1}')" = 8598a837fe0f1482955d66b2250c71f326bdec8ba53c845ac34aa17ea89b2f3c
-          echo AXIOM_PHASE14_QUEUE_ROW_V5_EXACT_MINI_INTERFACE_VERIFIED
+          echo AXIOM_PHASE14_QUEUE_ROW_V5_EXACT_CANDIDATE_RECONSTRUCTED
+          echo AXIOM_PHASE14_QUEUE_ROW_V5_CANDIDATE=e88a14e12b68fffb95e2dff59493c2ef15e11d11
+          echo AXIOM_PHASE14_QUEUE_ROW_V5_TREE=1b77a4e79f4dcbc31efd12ebe093b1a076f5c51c
 
       - name: Install Playwright 1.61
         run: |
