@@ -1,0 +1,163 @@
+name: Axiom Phase14 Offline Fix Encrypted Validation 20260913
+on:
+  push:
+    branches:
+      - tmp/axiom-phase13-14-candidate-measurement-20260913-1608
+    paths:
+      - .github/workflows/axiom-phase14-offline-fix-encrypted-validation-20260913.yml
+permissions:
+  contents: write
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - name: Setup patch-pinned Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12.14'
+      - name: Publish one-use X25519 transport key
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check 'cryptography==45.0.6'
+          python - <<'PY'
+          import base64
+          from pathlib import Path
+          from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+          from cryptography.hazmat.primitives.serialization import Encoding, PrivateFormat, PublicFormat, NoEncryption
+          priv=X25519PrivateKey.generate()
+          Path('/tmp/axiom-p14fix-private.bin').write_bytes(priv.private_bytes(Encoding.Raw,PrivateFormat.Raw,NoEncryption()))
+          Path('/tmp/axiom-p14fix-pubkey.txt').write_text(base64.b64encode(priv.public_key().public_bytes(Encoding.Raw,PublicFormat.Raw)).decode()+'\n')
+          PY
+          CONTENT=$(base64 -w0 /tmp/axiom-p14fix-pubkey.txt)
+          BODY=$(jq -nc --arg message 'ephemeral: publish one-use Axiom Phase14 fix key' --arg content "$CONTENT" --arg branch "$GITHUB_REF_NAME" '{message:$message,content:$content,branch:$branch}')
+          curl -fsS -X PUT -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' -d "$BODY" "https://api.github.com/repos/$GITHUB_REPOSITORY/contents/ephemeral/axiom-phase14-fix-pubkey.txt" >/dev/null
+          echo 'AXIOM_PHASE14_FIX_EPHEMERAL_PUBKEY_PUBLISHED'
+      - name: Wait for encrypted handoff
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          API="https://api.github.com/repos/$GITHUB_REPOSITORY/contents/ephemeral/axiom-phase14-fix-handoff.json?ref=$GITHUB_REF_NAME"
+          for i in $(seq 1 240); do
+            CODE=$(curl -sS -o /tmp/p14fix-api.json -w '%{http_code}' -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "$API" || true)
+            if [ "$CODE" = 200 ]; then
+              jq -r '.content' /tmp/p14fix-api.json | tr -d '\n' | base64 -d >/tmp/p14fix-handoff.json
+              RUN=$(jq -r '.run_id' /tmp/p14fix-handoff.json)
+              if [ "$RUN" = "$GITHUB_RUN_ID" ]; then
+                echo 'AXIOM_PHASE14_FIX_ENCRYPTED_HANDOFF_RECEIVED'
+                exit 0
+              fi
+            fi
+            sleep 5
+          done
+          echo 'AXIOM_PHASE14_FIX_HANDOFF_TIMEOUT'
+          exit 30
+      - name: Decrypt transport and verify exact WIP fix candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import base64,json
+          from pathlib import Path
+          from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey,X25519PublicKey
+          from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+          from cryptography.hazmat.primitives import hashes
+          from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+          h=json.loads(Path('/tmp/p14fix-handoff.json').read_text())
+          priv=X25519PrivateKey.from_private_bytes(Path('/tmp/axiom-p14fix-private.bin').read_bytes())
+          peer=X25519PublicKey.from_public_bytes(base64.b64decode(h['ephemeral_public_key_b64']))
+          key=HKDF(algorithm=hashes.SHA256(),length=32,salt=None,info=b'axiom-phase14-fix-dropbox-handoff-v1').derive(priv.exchange(peer))
+          plain=AESGCM(key).decrypt(base64.b64decode(h['nonce_b64']),base64.b64decode(h['ciphertext_b64']),b'axiom-phase14-fix-handoff')
+          Path('/tmp/p14fix-download.json').write_bytes(plain)
+          PY
+          URL=$(jq -r '.download_url' /tmp/p14fix-download.json)
+          curl --fail --silent --show-error --location "$URL" -o /tmp/p14fix-transport.enc
+          test "$(stat -c%s /tmp/p14fix-transport.enc)" = 7823765
+          test "$(sha256sum /tmp/p14fix-transport.enc | awk '{print $1}')" = bb222da944e43cdb74fc792bf08841784d490eb1505603e6866efb8c7e15eb37
+          python - <<'PY'
+          import base64,json,hashlib
+          from pathlib import Path
+          from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+          m=json.loads(Path('/tmp/p14fix-download.json').read_text())
+          raw=Path('/tmp/p14fix-transport.enc').read_bytes()
+          assert raw[:9]==b'AXIOMFIX1'
+          plain=AESGCM(base64.b64decode(m['payload_key_b64'])).decrypt(raw[9:21],raw[21:],b'MUSITU_AXIOM_PHASE14_BROWSER_OFFLINE_FIX_TRANSPORT')
+          assert hashlib.sha256(plain).hexdigest()=='f6693d7cd1abf02d62dda8363c5e3c3949c8d967915120a94f3f82f656cb199e'
+          assert len(plain)==7823728
+          Path('/tmp/p14fix.tar.gz').write_bytes(plain)
+          PY
+          mkdir -p /tmp/p14fix-payload
+          tar -xzf /tmp/p14fix.tar.gz -C /tmp/p14fix-payload
+          B=/tmp/p14fix-payload/MUSITU_AXIOM_PHASE14_BROWSER_OFFLINE_FIX_WIP_20260913.bundle
+          test "$(stat -c%s "$B")" = 7889892
+          test "$(sha256sum "$B" | awk '{print $1}')" = 922015145fabae383cd45e7d587d0da312c6894f9f54aafb97a41ce7978bd517
+          git init -q /tmp/p14fix-repo
+          cd /tmp/p14fix-repo
+          git fetch -q "$B" 'refs/heads/wip/axiom-v5-phase14-browser-offline-fix-20260913:refs/heads/wip-fix'
+          git checkout -q c555a8bb54449d12760842a2f2131e6f4fdb3c6d
+          test "$(git rev-parse HEAD^{tree})" = b8368cffcebdcc13c72a5d2555b3c3f54df674a2
+          test "$(git rev-parse HEAD^)" = e88a14e12b68fffb95e2dff59493c2ef15e11d11
+          test "$(git diff --name-only HEAD^ HEAD)" = axiom_interface/tests/run_browser_phase14.py
+          echo 'AXIOM_PHASE14_FIX_EXACT_CANDIDATE_VERIFIED sha=c555a8bb54449d12760842a2f2131e6f4fdb3c6d tree=b8368cffcebdcc13c72a5d2555b3c3f54df674a2'
+      - name: Install exact locked browser and semantic stack
+        shell: bash
+        working-directory: /tmp/p14fix-repo
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ffmpeg espeak-ng tesseract-ocr xvfb xdotool python3-tk scrot unzip ca-certificates curl
+          python -m pip install 'pip==26.2.1'
+          python -m pip install -r frontier_v5/requirements/fullstack.lock.txt
+          python -m pip check
+          python -m playwright install --with-deps chromium
+          PYTHONPATH=. python frontier_v5/scripts/verify_supply_chain.py --output /tmp/p14fix-supply-chain.json
+          curl --fail --silent --show-error --location --retry 3 --retry-all-errors https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip -o /tmp/p14fix-vosk.zip
+          echo '30f26242c4eb449f948e42cb302dd7a686cb29a3423a8367f99ff41780942498  /tmp/p14fix-vosk.zip' | sha256sum --check --strict
+          mkdir -p /tmp/p14fix-vosk
+          unzip -q /tmp/p14fix-vosk.zip -d /tmp/p14fix-vosk
+      - name: Run full Phase14 runtime candidate envelope unchanged
+        id: runtime
+        shell: bash
+        working-directory: /tmp/p14fix-repo
+        env:
+          AXIOM_PHASE8_SECURITY_ARTIFACT_DIR: /tmp/p14fix-p8-sec
+          AXIOM_PHASE9_SECURITY_ARTIFACT_DIR: /tmp/p14fix-p9-sec
+          AXIOM_PHASE10_SECURITY_ARTIFACT_DIR: /tmp/p14fix-p10-sec
+          AXIOM_PHASE11_SECURITY_ARTIFACT_DIR: /tmp/p14fix-p11-sec
+          AXIOM_PHASE12_SECURITY_ARTIFACT_DIR: /tmp/p14fix-p12-sec
+          AXIOM_PHASE13_SECURITY_ARTIFACT_DIR: /tmp/p14fix-p13-sec
+          AXIOM_PHASE14_SECURITY_ARTIFACT_DIR: /tmp/p14fix-p14-sec
+        run: PYTHONPATH=. python frontier_v5/scripts/run_phase14_regression_gate.py
+      - name: Run full inherited Phase14 browser candidate envelope unchanged
+        id: browser
+        shell: bash
+        working-directory: /tmp/p14fix-repo
+        env:
+          AXIOM_VOSK_MODEL_DIR: /tmp/p14fix-vosk/vosk-model-small-en-us-0.15
+          AXIOM_VOSK_MODEL_SHA256: 30f26242c4eb449f948e42cb302dd7a686cb29a3423a8367f99ff41780942498
+        run: PYTHONPATH=. python frontier_v5/scripts/run_phase14_browser_regression_gate.py
+      - name: Seal evidence digests and publish non-authoritative result
+        if: success()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test -s /tmp/axiom-interface-phase14/phase14-pwa-browser-evidence.json
+          EVIDENCE_SHA=$(sha256sum /tmp/axiom-interface-phase14/phase14-pwa-browser-evidence.json | awk '{print $1}')
+          SCREEN_SHA=$(sha256sum /tmp/axiom-interface-phase14/phase14-pwa-mobile-constrained.png | awk '{print $1}')
+          jq -nc --arg schema musitu.axiom.phase14-browser-offline-fix.external-validation.v1 --arg run "$GITHUB_RUN_ID" --arg sha c555a8bb54449d12760842a2f2131e6f4fdb3c6d --arg tree b8368cffcebdcc13c72a5d2555b3c3f54df674a2 --arg evidence "$EVIDENCE_SHA" --arg screenshot "$SCREEN_SHA" '{schema:$schema,run_id:($run|tonumber),authority_effect:"CANDIDATE_MEASUREMENT_ONLY_NO_PROMOTION_AUTHORITY",candidate_sha:$sha,candidate_tree:$tree,runtime_gate:"PASS",browser_regression_gate:"PASS_REAL_DEVICE_REQUIRED",browser_evidence_sha256:$evidence,mobile_screenshot_sha256:$screenshot,real_device_matrix:"NOT_RUN",phase14_earned:false}' >/tmp/p14fix-result.json
+          cat /tmp/p14fix-result.json
+          CONTENT=$(base64 -w0 /tmp/p14fix-result.json)
+          BODY=$(jq -nc --arg message 'evidence: publish Axiom Phase14 fix external validation result' --arg content "$CONTENT" --arg branch "$GITHUB_REF_NAME" '{message:$message,content:$content,branch:$branch}')
+          curl -fsS -X PUT -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' -d "$BODY" "https://api.github.com/repos/$GITHUB_REPOSITORY/contents/ephemeral/axiom-phase14-fix-result.json" >/dev/null
+          echo 'AXIOM_PHASE14_FIX_EXTERNAL_VALIDATION_PASS_REAL_DEVICE_REQUIRED'
+      - name: Destroy plaintext and ephemeral key material
+        if: always()
+        shell: bash
+        run: rm -rf /tmp/p14fix-repo /tmp/p14fix-payload /tmp/p14fix.tar.gz /tmp/p14fix-transport.enc /tmp/p14fix-download.json /tmp/p14fix-handoff.json /tmp/axiom-p14fix-private.bin /tmp/axiom-p14fix-pubkey.txt /tmp/p14fix-vosk /tmp/p14fix-vosk.zip
