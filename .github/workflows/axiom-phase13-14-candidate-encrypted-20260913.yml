@@ -1,0 +1,141 @@
+name: Axiom Phase13 Phase14 Candidate Encrypted 20260913
+
+on:
+  push:
+    branches:
+      - diagnostic/axiom-runner-canary-20260913
+    paths:
+      - '.github/workflows/axiom-phase13-14-candidate-encrypted-20260913.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  phase13-phase14-candidate-envelope:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 110
+    env:
+      GH_TOKEN: ${{ github.token }}
+      AXIOM_PHASE13_SECURITY_ARTIFACT_DIR: /tmp/axiom-interface-phase13-security
+      AXIOM_PHASE14_SECURITY_ARTIFACT_DIR: /tmp/axiom-interface-phase14-security
+    steps:
+      - name: Setup patch-pinned Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12.14'
+
+      - name: Acquire exact verified Phase 14 WIP bundle through one-use encrypted transport
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out /tmp/axiom_transport_priv.pem >/dev/null 2>&1
+          openssl pkey -in /tmp/axiom_transport_priv.pem -pubout -out /tmp/axiom_transport_pub.pem >/dev/null 2>&1
+          pub_b64=$(base64 -w0 /tmp/axiom_transport_pub.pem)
+          encoded=$(printf '%s' "$pub_b64" | base64 -w0)
+          jq -n --arg message 'diag: publish ephemeral Axiom candidate transport public key v5' --arg content "$encoded" --arg branch "$GITHUB_REF_NAME" '{message:$message,content:$content,branch:$branch}' >/tmp/pub_put.json
+          curl --fail --silent --show-error --request PUT -H "Authorization: Bearer ${GH_TOKEN}" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/.axiom_transport/public_key_v5.b64" --data-binary @/tmp/pub_put.json >/tmp/pub_put_response.json
+          echo 'AXIOM_EPHEMERAL_CANDIDATE_PUBLIC_KEY_PUBLISHED_V5'
+          pointer=/tmp/phase14_pointer_v5.txt
+          for i in $(seq 1 120); do
+            code=$(curl -L -sS -o /tmp/pointer_api.json -w '%{http_code}' -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/.axiom_transport/phase14_pointer_v5.txt?ref=diagnostic%2Faxiom-runner-canary-20260913&nonce=${i}" || true)
+            if [ "$code" = 200 ]; then
+              python -c "import base64,json; j=json.load(open('/tmp/pointer_api.json','r',encoding='utf-8')); open('/tmp/phase14_pointer_v5.txt','wb').write(base64.b64decode(j['content']))"
+              break
+            fi
+            sleep 5
+          done
+          test -s "$pointer" || { echo 'AXIOM_CANDIDATE_POINTER_V5_TIMEOUT'; exit 30; }
+          key_b64=$(awk -F= '$1=="KEY"{print substr($0,5)}' "$pointer")
+          data_b64=$(awk -F= '$1=="DATA"{print substr($0,6)}' "$pointer")
+          test -n "$key_b64" -a -n "$data_b64"
+          printf '%s' "$key_b64" | base64 -d > /tmp/pointer_key.enc
+          printf '%s' "$data_b64" | base64 -d > /tmp/pointer_data.enc
+          openssl pkeyutl -decrypt -inkey /tmp/axiom_transport_priv.pem -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -in /tmp/pointer_key.enc -out /tmp/pointer_pass.txt
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -in /tmp/pointer_data.enc -out /tmp/pointer.json -pass file:/tmp/pointer_pass.txt
+          python -c "import json; j=json.load(open('/tmp/pointer.json','r',encoding='utf-8')); [(_ for _ in ()).throw(AssertionError(k)) for k in ('url','payload_pass','cipher_sha256','plain_sha256','plain_size') if not j.get(k)]; open('/tmp/payload_url.txt','w').write(j['url']); open('/tmp/payload_pass.txt','w').write(j['payload_pass']); open('/tmp/cipher_sha.txt','w').write(j['cipher_sha256']); open('/tmp/plain_sha.txt','w').write(j['plain_sha256']); open('/tmp/plain_size.txt','w').write(str(j['plain_size']))"
+          url=$(cat /tmp/payload_url.txt)
+          curl --fail --silent --show-error --location "$url" --output /tmp/axiom_payload.enc
+          echo "$(cat /tmp/cipher_sha.txt)  /tmp/axiom_payload.enc" | sha256sum --check --strict
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -in /tmp/axiom_payload.enc -out /tmp/axiom_payload.bundle -pass file:/tmp/payload_pass.txt
+          test "$(stat -c%s /tmp/axiom_payload.bundle)" = "$(cat /tmp/plain_size.txt)"
+          echo "$(cat /tmp/plain_sha.txt)  /tmp/axiom_payload.bundle" | sha256sum --check --strict
+          git init -q /tmp/axiom-verify
+          (cd /tmp/axiom-verify && git bundle verify /tmp/axiom_payload.bundle)
+          git clone -q /tmp/axiom_payload.bundle /tmp/axiom-src
+          cd /tmp/axiom-src
+          git checkout -q e88a14e12b68fffb95e2dff59493c2ef15e11d11
+          test "$(git rev-parse HEAD^{tree})" = '1b77a4e79f4dcbc31efd12ebe093b1a076f5c51c'
+          test "$(git rev-parse HEAD^)" = '39c9ccff3ebce30c44f38b6262bc1489196f2d13'
+          test "$(git rev-parse HEAD^^{tree})" = 'b431092d61d455e0ff71656d7894cc900f4d9ea2'
+          test "$(git rev-parse HEAD^^^)" = 'aa3100aeb6c904bdf78b60194c76ebf2ea3ffb89'
+          echo 'AXIOM_PHASE13_PHASE14_WIP_CHAIN_VERIFIED'
+
+      - name: Install existing locked browser and semantic stack
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/axiom-src
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ffmpeg espeak-ng tesseract-ocr xvfb xdotool python3-tk scrot unzip ca-certificates curl
+          python -m pip install 'pip==26.2.1'
+          python -m pip install -r frontier_v5/requirements/fullstack.lock.txt
+          python -m pip check
+          python -m playwright install --with-deps chromium
+          PYTHONPATH=. python frontier_v5/scripts/verify_supply_chain.py --output /tmp/musitu-interface-supply-chain.json
+
+      - name: Fetch digest-pinned offline Vosk model
+        shell: bash
+        run: |
+          set -euo pipefail
+          model_zip=/tmp/vosk-model-small-en-us-0.15.zip
+          model_root=/tmp/axiom-vosk
+          rm -rf "$model_root" "$model_zip"
+          mkdir -p "$model_root"
+          curl --fail --silent --show-error --location --retry 3 --retry-all-errors https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip --output "$model_zip"
+          echo '30f26242c4eb449f948e42cb302dd7a686cb29a3423a8367f99ff41780942498  /tmp/vosk-model-small-en-us-0.15.zip' | sha256sum --check --strict
+          unzip -q "$model_zip" -d "$model_root"
+          test -d "$model_root/vosk-model-small-en-us-0.15/am"
+
+      - name: Run full inherited Phase 14 runtime candidate envelope
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/axiom-src
+          PYTHONPATH=. python frontier_v5/scripts/run_phase14_regression_gate.py
+          echo 'AXIOM_PHASE14_EXTERNAL_RUNTIME_CANDIDATE_PASS_REAL_DEVICE_REQUIRED'
+
+      - name: Run full inherited Phase 14 browser candidate envelope
+        shell: bash
+        env:
+          AXIOM_VOSK_MODEL_DIR: /tmp/axiom-vosk/vosk-model-small-en-us-0.15
+          AXIOM_VOSK_MODEL_SHA256: 30f26242c4eb449f948e42cb302dd7a686cb29a3423a8367f99ff41780942498
+        run: |
+          set -euo pipefail
+          cd /tmp/axiom-src
+          PYTHONPATH=. python frontier_v5/scripts/run_phase14_browser_regression_gate.py
+          echo 'AXIOM_PHASE14_EXTERNAL_BROWSER_CANDIDATE_PASS_REAL_DEVICE_REQUIRED'
+
+      - name: Seal Phase 13 and Phase 14 candidate evidence hashes to immutable job log
+        shell: bash
+        run: |
+          set -euo pipefail
+          files=(
+            /tmp/axiom-interface-phase13-security/phase13-security-evidence.json
+            /tmp/axiom-interface-phase14-security/phase14-security-evidence.json
+            /tmp/axiom-interface-phase13/phase13-evidence-browser-evidence.json
+            /tmp/axiom-interface-phase13/phase13-evidence-observatory-trust-center.png
+            /tmp/axiom-interface-phase14/phase14-pwa-browser-evidence.json
+            /tmp/axiom-interface-phase14/phase14-pwa-mobile-constrained.png
+            /tmp/musitu-interface-supply-chain.json
+          )
+          for f in "${files[@]}"; do test -s "$f"; done
+          echo 'AXIOM_PHASE13_PHASE14_EXTERNAL_CANDIDATE_EVIDENCE_BEGIN'
+          sha256sum "${files[@]}"
+          echo 'AXIOM_PHASE13_PHASE14_EXTERNAL_CANDIDATE_EVIDENCE_END'
+
+      - name: Cleanup private material
+        if: always()
+        shell: bash
+        run: |
+          rm -rf /tmp/axiom-src /tmp/axiom-verify /tmp/axiom_payload.bundle /tmp/axiom_payload.enc /tmp/axiom_transport_priv.pem /tmp/axiom_transport_pub.pem /tmp/pointer* /tmp/payload* /tmp/cipher_sha.txt /tmp/plain_sha.txt /tmp/plain_size.txt /tmp/pub_put.json /tmp/pub_put_response.json /tmp/axiom-vosk /tmp/vosk-model-small-en-us-0.15.zip
