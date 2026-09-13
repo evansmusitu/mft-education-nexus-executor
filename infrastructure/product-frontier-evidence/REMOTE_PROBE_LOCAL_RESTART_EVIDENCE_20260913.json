@@ -1,0 +1,36 @@
+{
+  "schema": "mft.product_frontier.remote_probe_local_restart.v1",
+  "classification": "LOCAL_HTTP_PROCESS_REPLACEMENT_EVIDENCE_NOT_MODAL_NOT_CLOUDFLARE",
+  "recorded_date": "2026-09-13",
+  "runtime_source_sha256": "29d149a7789375003e0e86499a4ee0f4f3995d16678176a2735f2f1c208e1c53",
+  "parent_overlay_sha256": "32e83dabc02b99c5441d91edb4bd6fdc8e86d2c6bb4ab270dac40d55979b1e1a",
+  "pre_restart": {
+    "passed": 9,
+    "total": 9,
+    "checks": [
+      "ui_served",
+      "health",
+      "server_identity_headmaster",
+      "predicted_not_observed",
+      "simulation_is_counterfactual",
+      "high_risk_self_approval_blocked",
+      "independent_approval_exact_digest",
+      "idempotent_execution",
+      "mutation_visible_pre_restart"
+    ]
+  },
+  "process_replacement": "hard process termination followed by fresh application construction over the same SQLite path",
+  "post_restart": {
+    "passed": 3,
+    "total": 3,
+    "checks": [
+      "mutation_survives_restart",
+      "rollback_accepted_from_fresh_process",
+      "rollback_restores_prior_state"
+    ]
+  },
+  "negative_probe_history_preserved": [
+    "initial probe incorrectly expected approval.status=APPROVED; actual approval API returns an approval record. The request itself returned HTTP 200 and execution succeeded. Probe was corrected to bind approver=qa-head-2 and exact proposal_digest."
+  ],
+  "promotion_effect": "NONE"
+}

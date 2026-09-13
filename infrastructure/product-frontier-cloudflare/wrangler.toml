@@ -1,0 +1,7 @@
+name = "mft-product-frontier-edge"
+main = "src/index.js"
+compatibility_date = "2026-09-13"
+workers_dev = true
+
+[observability]
+enabled = true

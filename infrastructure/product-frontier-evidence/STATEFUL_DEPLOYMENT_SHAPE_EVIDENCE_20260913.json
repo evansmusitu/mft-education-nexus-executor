@@ -1,0 +1,29 @@
+{
+  "checks": [
+    {"name": "origin_required", "pass": true},
+    {"name": "ui_served", "pass": true},
+    {"name": "login", "pass": true},
+    {"name": "predicted_boundary", "pass": true},
+    {"name": "simulation_pure", "pass": true},
+    {"name": "self_approval_blocked", "pass": true},
+    {"name": "second_actor_approval", "pass": true},
+    {"name": "execute", "pass": true},
+    {"name": "idempotent_execute", "pass": true},
+    {"name": "mutation_durable_before_restart", "pass": true},
+    {"name": "identity_survives_restart", "pass": true},
+    {"name": "money_state_shape_restart_persistence", "pass": true},
+    {"name": "rollback_after_restart", "pass": true},
+    {"name": "rollback_restores", "pass": true},
+    {"name": "evidence_chain_valid", "pass": true}
+  ],
+  "classification": "LOCAL_SHAPE_EVIDENCE_NOT_MODAL_NOT_CLOUDFLARE",
+  "database_bytes": 143360,
+  "database_wal_exists": true,
+  "parent_overlay_sha256": "32e83dabc02b99c5441d91edb4bd6fdc8e86d2c6bb4ab270dac40d55979b1e1a",
+  "passed": 15,
+  "promotion_effect": "NONE",
+  "runtime_source_sha256": "29d149a7789375003e0e86499a4ee0f4f3995d16678176a2735f2f1c208e1c53",
+  "schema": "mft.product_frontier.stateful_deployment_shape_local.v1",
+  "simulated_volume_commits": 10,
+  "total": 15
+}

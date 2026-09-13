@@ -1,0 +1,270 @@
+name: Product Frontier Modal Cloudflare Qualification 20260913
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - product-frontier-runtime-20260913
+    paths:
+      - 'infrastructure/product-frontier-modal/**'
+      - 'infrastructure/product-frontier-cloudflare/**'
+      - 'infrastructure/product-frontier-qualification/**'
+      - 'infrastructure/PRODUCT_FRONTIER_RUNTIME_CONTRACT_20260913.md'
+      - '.github/workflows/product-frontier-modal-cloudflare-qualification-20260913.yml'
+
+permissions:
+  contents: read
+
+env:
+  MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+  MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  NEXUS_EDGE_SHARED_SECRET: ${{ secrets.NEXUS_EDGE_SHARED_SECRET }}
+  RUNTIME_SOURCE: infrastructure/product-frontier-modal/input/runtime_source.zip
+  RUNTIME_SOURCE_SHA256: 29d149a7789375003e0e86499a4ee0f4f3995d16678176a2735f2f1c208e1c53
+  PARENT_OVERLAY_SHA256: 32e83dabc02b99c5441d91edb4bd6fdc8e86d2c6bb4ab270dac40d55979b1e1a
+
+jobs:
+  qualify:
+    name: exact-runtime-modal-cloudflare
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Fail closed unless provider credentials exist
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${MODAL_TOKEN_ID:-}" || { echo 'MODAL_TOKEN_ID missing'; exit 20; }
+          test -n "${MODAL_TOKEN_SECRET:-}" || { echo 'MODAL_TOKEN_SECRET missing'; exit 21; }
+          test -n "${CLOUDFLARE_API_TOKEN:-}" || { echo 'CLOUDFLARE_API_TOKEN missing'; exit 22; }
+          test -n "${CLOUDFLARE_ACCOUNT_ID:-}" || { echo 'CLOUDFLARE_ACCOUNT_ID missing'; exit 23; }
+          test -n "${NEXUS_EDGE_SHARED_SECRET:-}" || { echo 'NEXUS_EDGE_SHARED_SECRET missing'; exit 24; }
+
+      - name: Verify exact runtime source and parent provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "${RUNTIME_SOURCE_SHA256}  ${RUNTIME_SOURCE}" | sha256sum -c -
+          python - <<'PY'
+          import hashlib, json, os, pathlib, zipfile
+          p = pathlib.Path(os.environ['RUNTIME_SOURCE'])
+          with zipfile.ZipFile(p) as z:
+              assert z.testzip() is None
+              m = json.loads(z.read('RUNTIME_SOURCE_MANIFEST.json'))
+              assert m['parent_overlay_sha256'] == os.environ['PARENT_OVERLAY_SHA256']
+              assert len(m['files']) == 17
+              expected = {row['path'] for row in m['files']} | {'RUNTIME_SOURCE_MANIFEST.json'}
+              assert set(z.namelist()) == expected
+              for row in m['files']:
+                  data = z.read(row['path'])
+                  assert len(data) == int(row['bytes'])
+                  assert hashlib.sha256(data).hexdigest() == row['sha256']
+          print('exact_runtime_provenance=PASS')
+          PY
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install pinned Modal client
+        shell: bash
+        run: python -m pip install --disable-pip-version-check --no-cache-dir 'modal==1.5.5'
+
+      - name: Install domain-separated qualification runtime secret
+        shell: bash
+        run: |
+          set -euo pipefail
+          IDENTITY_KEY_HEX="$(printf 'mft-product-frontier-identity-v1:%s' "$NEXUS_EDGE_SHARED_SECRET" | sha256sum | awk '{print $1}')"
+          QA_PASSWORD="$(printf 'mft-product-frontier-qa-user-v1:%s' "$NEXUS_EDGE_SHARED_SECRET" | sha256sum | awk '{print $1}')"
+          echo "::add-mask::${QA_PASSWORD}"
+          echo "MFT_QA_PASSWORD=${QA_PASSWORD}" >> "$GITHUB_ENV"
+          modal secret create mft-product-frontier-runtime-secrets \
+            "MFT_EDGE_ORIGIN_SECRET=${NEXUS_EDGE_SHARED_SECRET}" \
+            "MFT_IDENTITY_KEY_HEX=${IDENTITY_KEY_HEX}" \
+            "MFT_QUALIFICATION_BOOTSTRAP=1" \
+            --force
+          unset IDENTITY_KEY_HEX QA_PASSWORD
+
+      - name: Deploy exact runtime to Modal
+        shell: bash
+        run: |
+          set -euo pipefail
+          modal deploy infrastructure/product-frontier-modal/modal_app.py | tee modal_deploy.txt
+          python - <<'PY' >> "$GITHUB_ENV"
+          import modal
+          fn = modal.Function.from_name('mft-product-frontier-runtime', 'runtime')
+          url = fn.get_web_url()
+          if not url or not url.startswith('https://'):
+              raise SystemExit('modal_web_url_missing')
+          print(f'MFT_MODAL_ORIGIN={url.rstrip("/")}')
+          PY
+
+      - name: Verify Modal origin and direct-origin boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          DIRECT_STATUS="$(curl --silent --show-error -o modal_direct_unauthorized.json -w '%{http_code}' "${MFT_MODAL_ORIGIN}/_mft/runtime/health")"
+          test "$DIRECT_STATUS" = '403'
+          curl --fail --silent --show-error \
+            -H "x-mft-origin-secret: ${NEXUS_EDGE_SHARED_SECRET}" \
+            "${MFT_MODAL_ORIGIN}/_mft/runtime/health" > modal_health.json
+          python - <<'PY'
+          import json, os
+          h=json.load(open('modal_health.json'))
+          assert h['status']=='ok'
+          assert h['runtime_source_sha256']==os.environ['RUNTIME_SOURCE_SHA256']
+          assert h['parent_overlay_sha256']==os.environ['PARENT_OVERLAY_SHA256']
+          assert h['modal_max_containers']==1
+          assert h['qualification_fixture'] is True
+          assert h['promotion_effect']=='NONE'
+          print('modal_exact_runtime_health=PASS')
+          PY
+
+      - name: Run governed workflow on Modal before container replacement
+        shell: bash
+        run: |
+          set -euo pipefail
+          QUALIFICATION_BASE_URL="$MFT_MODAL_ORIGIN" \
+          MFT_ORIGIN_SECRET="$NEXUS_EDGE_SHARED_SECRET" \
+          python infrastructure/product-frontier-qualification/remote_probe.py \
+            pre modal_probe_state.json modal_probe_pre.json
+
+      - name: Replace Modal container without changing code
+        shell: bash
+        run: |
+          set -euo pipefail
+          modal app rollover mft-product-frontier-runtime --strategy recreate
+          ok=0
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent --show-error \
+              -H "x-mft-origin-secret: ${NEXUS_EDGE_SHARED_SECRET}" \
+              "${MFT_MODAL_ORIGIN}/_mft/runtime/health" > modal_health_after_rollover.json; then
+              ok=1
+              break
+            fi
+            sleep 2
+          done
+          test "$ok" = '1'
+
+      - name: Prove state survives Modal container replacement then rollback
+        shell: bash
+        run: |
+          set -euo pipefail
+          QUALIFICATION_BASE_URL="$MFT_MODAL_ORIGIN" \
+          MFT_ORIGIN_SECRET="$NEXUS_EDGE_SHARED_SECRET" \
+          python infrastructure/product-frontier-qualification/remote_probe.py \
+            post modal_probe_state.json modal_probe_post.json
+
+      - name: Bind verified Modal origin into temporary Wrangler config
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${MFT_MODAL_ORIGIN:-}" != ''
+          cat >> infrastructure/product-frontier-cloudflare/wrangler.toml <<EOF
+
+          [vars]
+          MFT_MODAL_ORIGIN = "${MFT_MODAL_ORIGIN}"
+          EOF
+          grep -F 'MFT_MODAL_ORIGIN = "https://' infrastructure/product-frontier-cloudflare/wrangler.toml
+
+      - name: Deploy Cloudflare stateless edge
+        id: cloudflare
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: infrastructure/product-frontier-cloudflare
+          wranglerVersion: '4.131.1'
+          command: deploy
+          secrets: |
+            MFT_EDGE_ORIGIN_SECRET
+        env:
+          MFT_EDGE_ORIGIN_SECRET: ${{ secrets.NEXUS_EDGE_SHARED_SECRET }}
+
+      - name: Verify Cloudflare edge reaches exact Modal runtime
+        shell: bash
+        env:
+          WRANGLER_OUTPUT: ${{ steps.cloudflare.outputs.command-output }}
+          DEPLOYMENT_URL: ${{ steps.cloudflare.outputs.deployment-url }}
+        run: |
+          set -euo pipefail
+          EDGE_URL="${DEPLOYMENT_URL:-}"
+          if [[ "$EDGE_URL" != https://* ]]; then
+            EDGE_URL="$(printf '%s\n' "$WRANGLER_OUTPUT" | grep -Eo 'https://[^[:space:]]+workers\.dev' | tail -1 || true)"
+          fi
+          test -n "$EDGE_URL" || { echo 'cloudflare_deployment_url_missing'; exit 40; }
+          echo "MFT_EDGE_URL=${EDGE_URL%/}" >> "$GITHUB_ENV"
+          curl --fail --silent --show-error "${EDGE_URL%/}/_edge/health" > edge_health.json
+          python - <<'PY'
+          import json, os
+          h=json.load(open('edge_health.json'))
+          assert h['status']=='ok'
+          assert h['origin']['runtime_source_sha256']==os.environ['RUNTIME_SOURCE_SHA256']
+          assert h['origin']['parent_overlay_sha256']==os.environ['PARENT_OVERLAY_SHA256']
+          assert h['origin']['modal_max_containers']==1
+          assert h['promotion_effect']=='NONE'
+          print('cloudflare_modal_exact_runtime_health=PASS')
+          PY
+
+      - name: Run governed workflow end-to-end through Cloudflare
+        shell: bash
+        run: |
+          set -euo pipefail
+          QUALIFICATION_BASE_URL="$MFT_EDGE_URL" \
+          python infrastructure/product-frontier-qualification/remote_probe.py \
+            pre edge_probe_state.json edge_probe_pre.json
+          QUALIFICATION_BASE_URL="$MFT_EDGE_URL" \
+          python infrastructure/product-frontier-qualification/remote_probe.py \
+            post edge_probe_state.json edge_probe_post.json
+
+      - name: Seal qualification evidence
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib, json, os, pathlib, time
+          names=[
+            'modal_deploy.txt','modal_direct_unauthorized.json','modal_health.json',
+            'modal_health_after_rollover.json','modal_probe_pre.json','modal_probe_post.json',
+            'edge_health.json','edge_probe_pre.json','edge_probe_post.json'
+          ]
+          files=[]
+          for name in names:
+              p=pathlib.Path(name)
+              if p.exists():
+                  files.append({'path':name,'sha256':hashlib.sha256(p.read_bytes()).hexdigest(),'bytes':p.stat().st_size})
+          report={
+              'schema':'mft.product_frontier.remote_qualification.v2',
+              'recorded_at_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),
+              'runtime_source_sha256':os.environ['RUNTIME_SOURCE_SHA256'],
+              'parent_overlay_sha256':os.environ['PARENT_OVERLAY_SHA256'],
+              'modal_origin':os.environ.get('MFT_MODAL_ORIGIN'),
+              'cloudflare_edge':os.environ.get('MFT_EDGE_URL'),
+              'modal_container_replacement_required':True,
+              'promotion_effect':'NONE',
+              'files':files,
+          }
+          pathlib.Path('qualification_evidence.json').write_text(json.dumps(report,indent=2,sort_keys=True)+'\n')
+          PY
+
+      - name: Upload qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: product-frontier-modal-cloudflare-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            qualification_evidence.json
+            modal_deploy.txt
+            modal_direct_unauthorized.json
+            modal_health.json
+            modal_health_after_rollover.json
+            modal_probe_pre.json
+            modal_probe_post.json
+            edge_health.json
+            edge_probe_pre.json
+            edge_probe_post.json
+          if-no-files-found: warn
+          retention-days: 30
