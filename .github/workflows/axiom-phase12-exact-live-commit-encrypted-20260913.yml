@@ -1,0 +1,197 @@
+name: Axiom Phase12 Exact Live Commit Encrypted 20260913
+
+on:
+  push:
+    branches:
+      - diagnostic/axiom-runner-canary-20260913
+    paths:
+      - '.github/workflows/axiom-phase12-exact-live-commit-encrypted-20260913.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: axiom-phase12-exact-live-commit-encrypted-20260913
+  cancel-in-progress: false
+
+jobs:
+  phase12-exact-live-commit-full-envelope:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - name: Setup patch-pinned Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12.14'
+
+      - name: Publish ephemeral public key and acquire encrypted verified bundle
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out /tmp/axiom_transport_priv.pem >/dev/null 2>&1
+          openssl pkey -in /tmp/axiom_transport_priv.pem -pubout -out /tmp/axiom_transport_pub.pem >/dev/null 2>&1
+          pub_b64=$(base64 -w0 /tmp/axiom_transport_pub.pem)
+          encoded=$(printf '%s' "$pub_b64" | base64 -w0)
+          jq -n --arg message 'diag: publish exact-live Phase12 ephemeral transport public key' --arg content "$encoded" --arg branch "$GITHUB_REF_NAME" '{message:$message,content:$content,branch:$branch}' >/tmp/pub_put.json
+          curl --fail --silent --show-error --request PUT -H "Authorization: Bearer ${GH_TOKEN}" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/.axiom_transport/phase12_live_public_key.b64" --data-binary @/tmp/pub_put.json >/tmp/pub_put_response.json
+          echo 'AXIOM_PHASE12_EXACT_LIVE_EPHEMERAL_PUBLIC_KEY_PUBLISHED'
+
+          pointer=/tmp/phase12_live_pointer.txt
+          for i in $(seq 1 120); do
+            code=$(curl -L -sS -o /tmp/pointer_api.json -w '%{http_code}' -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/.axiom_transport/phase12_live_pointer.txt?ref=diagnostic%2Faxiom-runner-canary-20260913&nonce=${i}" || true)
+            if [ "$code" = 200 ]; then
+              python -c "import base64,json; j=json.load(open('/tmp/pointer_api.json','r',encoding='utf-8')); open('/tmp/phase12_live_pointer.txt','wb').write(base64.b64decode(j['content']))"
+              break
+            fi
+            sleep 5
+          done
+          test -s "$pointer" || { echo 'AXIOM_PHASE12_EXACT_LIVE_POINTER_TIMEOUT'; exit 30; }
+          key_b64=$(awk -F= '$1=="KEY"{print substr($0,5)}' "$pointer")
+          data_b64=$(awk -F= '$1=="DATA"{print substr($0,6)}' "$pointer")
+          test -n "$key_b64" -a -n "$data_b64"
+          printf '%s' "$key_b64" | base64 -d > /tmp/pointer_key.enc
+          printf '%s' "$data_b64" | base64 -d > /tmp/pointer_data.enc
+          openssl pkeyutl -decrypt -inkey /tmp/axiom_transport_priv.pem -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -in /tmp/pointer_key.enc -out /tmp/pointer_pass.txt
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -in /tmp/pointer_data.enc -out /tmp/pointer.json -pass file:/tmp/pointer_pass.txt
+          python -c "import json; j=json.load(open('/tmp/pointer.json','r',encoding='utf-8')); [(_ for _ in ()).throw(AssertionError(k)) for k in ('url','payload_pass','cipher_sha256','plain_sha256','plain_size') if not j.get(k)]; open('/tmp/payload_url.txt','w').write(j['url']); open('/tmp/payload_pass.txt','w').write(j['payload_pass']); open('/tmp/cipher_sha.txt','w').write(j['cipher_sha256']); open('/tmp/plain_sha.txt','w').write(j['plain_sha256']); open('/tmp/plain_size.txt','w').write(str(j['plain_size']))"
+          url=$(cat /tmp/payload_url.txt)
+          curl --fail --silent --show-error --location "$url" --output /tmp/axiom_payload.enc
+          echo "$(cat /tmp/cipher_sha.txt)  /tmp/axiom_payload.enc" | sha256sum --check --strict
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -in /tmp/axiom_payload.enc -out /tmp/axiom_payload.bundle -pass file:/tmp/payload_pass.txt
+          test "$(stat -c%s /tmp/axiom_payload.bundle)" = "$(cat /tmp/plain_size.txt)"
+          echo "$(cat /tmp/plain_sha.txt)  /tmp/axiom_payload.bundle" | sha256sum --check --strict
+          git init -q /tmp/axiom-verify
+          (cd /tmp/axiom-verify && git bundle verify /tmp/axiom_payload.bundle)
+          git clone -q /tmp/axiom_payload.bundle /tmp/axiom-src
+          echo 'AXIOM_PHASE12_EXACT_LIVE_ENCRYPTED_BUNDLE_VERIFIED'
+
+      - name: Reconstruct and verify exact live Phase 12 Git commit identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/axiom-src
+          python - <<'PY' > /tmp/phase12-live-commit.raw
+          import sys
+          raw = (
+              'tree 510e24525fae4707eaad1c6e6004b7ce03888645\n'
+              'parent 98f74b9184dc4ea0bc2e784878c93f436afb0cc9\n'
+              'author evansmusitu <evansmusitu5@gmail.com> 1789293503 +0200\n'
+              'committer evansmusitu <evansmusitu5@gmail.com> 1789293503 +0200\n'
+              '\n'
+              'feat(axiom): add Phase 12 developer marketplace substrate'
+          ).encode('utf-8')
+          sys.stdout.buffer.write(raw)
+          PY
+          live_sha=$(git hash-object -w -t commit --stdin < /tmp/phase12-live-commit.raw)
+          test "$live_sha" = 'cabb5767157afa2f688ef5718eee9452b7d98177'
+          git checkout -q --detach "$live_sha"
+          test "$(git rev-parse HEAD)" = 'cabb5767157afa2f688ef5718eee9452b7d98177'
+          test "$(git rev-parse HEAD^{tree})" = '510e24525fae4707eaad1c6e6004b7ce03888645'
+          test "$(git rev-parse HEAD^)" = '98f74b9184dc4ea0bc2e784878c93f436afb0cc9'
+          mkdir -p .git/refs/remotes/origin/frontier .git/refs/remotes/origin/archive
+          printf '%s\n' d6a846f6bbe0bccac1758713eb4de167caf07113 > .git/refs/remotes/origin/main
+          printf '%s\n' d9196774a9fff3150922e2cb681d16e2423651da > .git/refs/remotes/origin/frontier/axiom-v5-skill-fabric
+          printf '%s\n' 20a84b1090b8ad986e35fee20008f3ed8920440c > .git/refs/remotes/origin/archive/axiom-track-a-post-freeze-20260912
+          printf '%s\n' 73ecdbad38cb10020b6e30ebe42a9222a3bb6c55 > .git/refs/remotes/origin/frontier/axiom-v5-world-top-tier-review-safe
+          printf '%s\n' cabb5767157afa2f688ef5718eee9452b7d98177 > .git/refs/remotes/origin/frontier/axiom-v5-interface-phase12-developer-marketplace-20260913
+          export GITHUB_SHA="$live_sha"
+          export GITHUB_REF='refs/heads/frontier/axiom-v5-interface-phase12-developer-marketplace-20260913'
+          export GITHUB_REF_NAME='frontier/axiom-v5-interface-phase12-developer-marketplace-20260913'
+          echo "AXIOM_PHASE12_EXACT_LIVE_COMMIT_VERIFIED sha=$(git rev-parse HEAD) tree=$(git rev-parse HEAD^{tree}) parent=$(git rev-parse HEAD^)"
+          PYTHONPATH=. python frontier_v5/scripts/verify_phase12_authority.py
+
+      - name: Run exact live Phase 12 runtime security and inherited regression envelope
+        shell: bash
+        env:
+          AXIOM_PHASE8_SECURITY_ARTIFACT_DIR: /tmp/axiom-interface-phase8-security
+          AXIOM_PHASE9_SECURITY_ARTIFACT_DIR: /tmp/axiom-interface-phase9-security
+          AXIOM_PHASE10_SECURITY_ARTIFACT_DIR: /tmp/axiom-interface-phase10-security
+          AXIOM_PHASE11_SECURITY_ARTIFACT_DIR: /tmp/axiom-interface-phase11-security
+          AXIOM_PHASE12_SECURITY_ARTIFACT_DIR: /tmp/axiom-interface-phase12-security
+        run: |
+          set -euo pipefail
+          cd /tmp/axiom-src
+          export GITHUB_SHA='cabb5767157afa2f688ef5718eee9452b7d98177'
+          export GITHUB_REF='refs/heads/frontier/axiom-v5-interface-phase12-developer-marketplace-20260913'
+          export GITHUB_REF_NAME='frontier/axiom-v5-interface-phase12-developer-marketplace-20260913'
+          PYTHONPATH=. python frontier_v5/scripts/run_phase12_regression_gate.py
+          echo 'AXIOM_PHASE12_EXACT_LIVE_RUNTIME_PASS'
+          sha256sum \
+            /tmp/axiom-interface-phase8-security/phase8-security-evidence.json \
+            /tmp/axiom-interface-phase9-security/phase9-security-evidence.json \
+            /tmp/axiom-interface-phase10-security/phase10-security-evidence.json \
+            /tmp/axiom-interface-phase11-security/phase11-security-evidence.json \
+            /tmp/axiom-interface-phase12-security/phase12-security-evidence.json
+
+      - name: Install existing locked browser and semantic stack
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/axiom-src
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ffmpeg espeak-ng tesseract-ocr xvfb xdotool python3-tk scrot unzip ca-certificates curl
+          python -m pip install 'pip==26.2.1'
+          python -m pip install -r frontier_v5/requirements/fullstack.lock.txt
+          python -m pip check
+          python -m playwright install --with-deps chromium
+          PYTHONPATH=. python frontier_v5/scripts/verify_supply_chain.py --output /tmp/musitu-interface-supply-chain.json
+
+      - name: Fetch digest-pinned offline Vosk model
+        shell: bash
+        run: |
+          set -euo pipefail
+          model_zip=/tmp/vosk-model-small-en-us-0.15.zip
+          model_root=/tmp/axiom-vosk
+          rm -rf "$model_root" "$model_zip"
+          mkdir -p "$model_root"
+          curl --fail --silent --show-error --location --retry 3 --retry-all-errors https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip --output "$model_zip"
+          echo '30f26242c4eb449f948e42cb302dd7a686cb29a3423a8367f99ff41780942498  /tmp/vosk-model-small-en-us-0.15.zip' | sha256sum --check --strict
+          unzip -q "$model_zip" -d "$model_root"
+          test -d "$model_root/vosk-model-small-en-us-0.15/am"
+
+      - name: Run exact live Phase 12 browser semantic and isolation regression envelope
+        shell: bash
+        env:
+          AXIOM_VOSK_MODEL_DIR: /tmp/axiom-vosk/vosk-model-small-en-us-0.15
+          AXIOM_VOSK_MODEL_SHA256: 30f26242c4eb449f948e42cb302dd7a686cb29a3423a8367f99ff41780942498
+        run: |
+          set -euo pipefail
+          cd /tmp/axiom-src
+          export GITHUB_SHA='cabb5767157afa2f688ef5718eee9452b7d98177'
+          export GITHUB_REF='refs/heads/frontier/axiom-v5-interface-phase12-developer-marketplace-20260913'
+          export GITHUB_REF_NAME='frontier/axiom-v5-interface-phase12-developer-marketplace-20260913'
+          PYTHONPATH=. python frontier_v5/scripts/run_phase12_browser_regression_gate.py
+          echo 'AXIOM_PHASE12_EXACT_LIVE_BROWSER_PASS'
+          files=(
+            /tmp/axiom-interface-phase12/phase12-developer-browser-evidence.json
+            /tmp/axiom-interface-phase12/phase12-developer-marketplace.png
+            /tmp/axiom-interface-phase11/phase11-operator-browser-evidence.json
+            /tmp/axiom-interface-phase11/phase11-operator-control-plane.png
+            /tmp/axiom-interface-phase10/phase10-memory-browser-evidence.json
+            /tmp/axiom-interface-phase10/phase10-memory-graph.png
+            /tmp/axiom-interface-phase9/phase9-agent-automation-browser-evidence.json
+            /tmp/axiom-interface-phase8/phase8-computer-browser-evidence.json
+            /tmp/axiom-interface-phase7-semantic/phase7-semantic-evidence.json
+            /tmp/axiom-interface-phase7/phase7-live-evidence.json
+            /tmp/axiom-interface-phase6/phase6-observability-evidence.json
+            /tmp/axiom-interface-phase5/phase5-artifact-evidence.json
+            /tmp/axiom-interface-phase4/phase4-research-evidence.json
+            /tmp/axiom-interface-phase4-quality/phase4-blueprint-completeness-evidence.json
+            /tmp/axiom-interface-phase3/phase3-work-evidence.json
+            /tmp/axiom-interface-phase2/project-evidence.json
+            /tmp/axiom-interface-phase1/browser-evidence.json
+            /tmp/musitu-interface-supply-chain.json
+          )
+          for f in "${files[@]}"; do test -s "$f"; done
+          sha256sum "${files[@]}"
+          echo 'AXIOM_PHASE12_EXACT_LIVE_COMMIT_FULL_ENVELOPE_PASS'
+
+      - name: Remove private source and transport material
+        if: always()
+        shell: bash
+        run: |
+          rm -rf /tmp/axiom-src /tmp/axiom-verify /tmp/axiom_payload.bundle /tmp/axiom_payload.enc /tmp/axiom_transport_priv.pem /tmp/axiom_transport_pub.pem /tmp/pointer* /tmp/payload* /tmp/cipher_sha.txt /tmp/plain_sha.txt /tmp/plain_size.txt /tmp/pub_put.json /tmp/pub_put_response.json /tmp/phase12-live-commit.raw /tmp/axiom-vosk /tmp/vosk-model-small-en-us-0.15.zip
