@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
+import json
 import os
 import sys
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import modal
 
 APP_NAME = 'mft-product-frontier-runtime'
 VOLUME_NAME = 'mft-product-frontier-runtime-data'
 SECRET_NAME = 'mft-product-frontier-runtime-secrets'
-SOURCE_ZIP = Path('/opt/mft-product-frontier/source/recovery_overlay.zip')
-EXPECTED_SOURCE_SHA256 = '32e83dabc02b99c5441d91edb4bd6fdc8e86d2c6bb4ab270dac40d55979b1e1a'
+SOURCE_ZIP = Path('/opt/mft-product-frontier/source/runtime_source.zip')
+EXPECTED_SOURCE_SHA256 = '29d149a7789375003e0e86499a4ee0f4f3995d16678176a2735f2f1c208e1c53'
+PARENT_OVERLAY_SHA256 = '32e83dabc02b99c5441d91edb4bd6fdc8e86d2c6bb4ab270dac40d55979b1e1a'
 RUNTIME_ROOT = Path('/opt/mft-product-frontier/runtime')
 DATA_ROOT = Path('/var/lib/mft-product-frontier')
 DB_PATH = DATA_ROOT / 'institution.db'
@@ -22,14 +25,14 @@ volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 secret = modal.Secret.from_name(SECRET_NAME)
 
 HERE = Path(__file__).resolve().parent
-LOCAL_SOURCE_ZIP = HERE / 'input' / 'recovery_overlay.zip'
+LOCAL_SOURCE_ZIP = HERE / 'input' / 'runtime_source.zip'
 
 image = (
     modal.Image.debian_slim(python_version='3.12')
     .pip_install(
-        'fastapi==0.116.1',
-        'pydantic==2.11.7',
-        'cryptography==45.0.6',
+        'fastapi==0.128.2',
+        'pydantic==2.13.4',
+        'cryptography==46.0.4',
     )
     .add_local_file(str(LOCAL_SOURCE_ZIP), str(SOURCE_ZIP), copy=True)
 )
@@ -38,19 +41,35 @@ image = (
 def verify_and_extract() -> Path:
     actual = hashlib.sha256(SOURCE_ZIP.read_bytes()).hexdigest()
     if actual != EXPECTED_SOURCE_SHA256:
-        raise RuntimeError(f'overlay_sha256_mismatch:{actual}')
-    if not RUNTIME_ROOT.exists():
+        raise RuntimeError(f'runtime_source_sha256_mismatch:{actual}')
+
+    with zipfile.ZipFile(SOURCE_ZIP) as archive:
+        bad = archive.testzip()
+        if bad is not None:
+            raise RuntimeError(f'runtime_source_zip_crc_failure:{bad}')
+        manifest = json.loads(archive.read('RUNTIME_SOURCE_MANIFEST.json'))
+        if manifest.get('parent_overlay_sha256') != PARENT_OVERLAY_SHA256:
+            raise RuntimeError('parent_overlay_sha256_mismatch')
+        expected = {row['path']: row for row in manifest.get('files', [])}
+        if not expected:
+            raise RuntimeError('runtime_source_manifest_empty')
+        for name, row in expected.items():
+            pure = PurePosixPath(name)
+            if pure.is_absolute() or '..' in pure.parts:
+                raise RuntimeError(f'unsafe_runtime_path:{name}')
+            data = archive.read(name)
+            if len(data) != int(row['bytes']):
+                raise RuntimeError(f'runtime_source_size_mismatch:{name}')
+            if hashlib.sha256(data).hexdigest() != row['sha256']:
+                raise RuntimeError(f'runtime_source_file_hash_mismatch:{name}')
         RUNTIME_ROOT.mkdir(parents=True, exist_ok=True)
-        with zipfile.ZipFile(SOURCE_ZIP) as archive:
-            archive.testzip() is None or (_ for _ in ()).throw(RuntimeError('overlay_zip_crc_failure'))
-            archive.extractall(RUNTIME_ROOT)
-    roots = [p for p in RUNTIME_ROOT.iterdir() if p.is_dir()]
-    if len(roots) != 1:
-        raise RuntimeError('overlay_root_not_unique')
-    root = roots[0]
-    if not (root / 'institution_os' / 'api.py').is_file():
-        raise RuntimeError('overlay_api_missing')
-    return root
+        archive.extractall(RUNTIME_ROOT)
+
+    if not (RUNTIME_ROOT / 'institution_os' / 'api.py').is_file():
+        raise RuntimeError('runtime_api_missing')
+    if not (RUNTIME_ROOT / 'institution_ui' / 'index.html').is_file():
+        raise RuntimeError('runtime_ui_missing')
+    return RUNTIME_ROOT
 
 
 @app.function(
@@ -69,7 +88,8 @@ def verify_and_extract() -> Path:
 def runtime():
     root = verify_and_extract()
     sys.path.insert(0, str(root))
-    from fastapi import HTTPException, Request
+    from fastapi import Request
+    from fastapi.responses import JSONResponse
     from institution_os.api import create_app
 
     identity_key_hex = os.environ.get('MFT_IDENTITY_KEY_HEX', '')
@@ -88,12 +108,14 @@ def runtime():
 
     @api.middleware('http')
     async def edge_boundary(request: Request, call_next):
-        if request.headers.get('x-mft-origin-secret', '') != origin_secret:
-            raise HTTPException(status_code=403, detail='edge_origin_required')
+        supplied = request.headers.get('x-mft-origin-secret', '')
+        if not hmac.compare_digest(supplied, origin_secret):
+            return JSONResponse({'detail': 'edge_origin_required'}, status_code=403)
         response = await call_next(request)
         if request.method in {'POST', 'PUT', 'PATCH', 'DELETE'} and response.status_code < 500:
             volume.commit()
-        response.headers['x-mft-runtime-overlay-sha256'] = EXPECTED_SOURCE_SHA256
+        response.headers['x-mft-runtime-source-sha256'] = EXPECTED_SOURCE_SHA256
+        response.headers['x-mft-parent-overlay-sha256'] = PARENT_OVERLAY_SHA256
         response.headers['cache-control'] = 'no-store'
         return response
 
@@ -102,8 +124,9 @@ def runtime():
         return {
             'status': 'ok',
             'mode': 'PARITY_CANDIDATE_REMOTE_QUALIFICATION',
-            'overlay_sha256': EXPECTED_SOURCE_SHA256,
-            'database': 'sqlite-persistent-volume',
+            'runtime_source_sha256': EXPECTED_SOURCE_SHA256,
+            'parent_overlay_sha256': PARENT_OVERLAY_SHA256,
+            'database': 'sqlite-persistent-modal-volume',
             'modal_max_containers': 1,
             'promotion_effect': 'NONE',
         }
