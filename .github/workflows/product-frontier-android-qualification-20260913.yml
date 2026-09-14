@@ -10,6 +10,7 @@ env:
   V3_PACKAGE_SHA256: 90fab790cf696ca6fd65ceb30815bc7175f1f59abddc6f096ae471cee7ae5f21
   ANDROID_DIR: android_qualification_work/MFT_SOVEREIGN_INSTITUTION_ANDROID_FRONTIER_HARDENED_SOURCE
   PACKAGE_ID: com.musitu.sovereigninstitution
+  LAUNCH_COMPONENT: com.musitu.sovereigninstitution/.MainActivity
   EXPO_PUBLIC_MFT_API_URL: https://institution.example.invalid
   NODE_ENV: production
   CI: '1'
@@ -120,7 +121,7 @@ jobs:
           script: |
             adb install -r "$APK" | tee emulator_install.txt
             adb logcat -c
-            adb shell am start -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p "$PACKAGE_ID" | tee emulator_start.txt
+            adb shell am start -W -n "$LAUNCH_COMPONENT" | tee emulator_start.txt
             sleep 12
             adb shell pidof "$PACKAGE_ID" | tr -d '\r' | tee emulator_pid.txt
             adb shell dumpsys window windows | grep -E 'mCurrentFocus|mFocusedApp' | tee emulator_focus.txt || true
