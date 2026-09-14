@@ -1,0 +1,3 @@
+MUSITU Android V4 qualification trigger
+sealed_v4_zip_sha256=921964b0fd8fb566b1f02faa9c59aa290dc61b6365532cac1cd58f8d4b6ef21e
+v4_manifest_sha256=420a024390a4a9a94acaa4ff4ee169f6e800d13e03633215cd0db0e03035ca0c
