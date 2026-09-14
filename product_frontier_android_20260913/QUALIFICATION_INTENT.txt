@@ -1,0 +1,3 @@
+Qualification input is the sealed ZIP in this directory.
+Expected SHA-256: 14ba42284e284f902adef81e1049c021a67cb053c99db9db47b97d0b1706edb3
+No merge or product promotion is implied. Build and emulator evidence only.

@@ -1,0 +1,76 @@
+name: API36 Exact Artifact Smoke 20260914
+on:
+  push:
+    branches: [product-frontier-android-20260913]
+    paths: ['.github/workflows/api36-exact-artifact-smoke-20260914.yml']
+permissions:
+  contents: read
+  actions: read
+env:
+  SOURCE_RUN_ID: '34765883433'
+  SOURCE_ARTIFACT: product-frontier-android-build-34765883433-1
+  PACKAGE_ID: com.musitu.sovereigninstitution
+  LAUNCH_COMPONENT: com.musitu.sovereigninstitution/.MainActivity
+  EXPECTED_APK_SHA256: 8055c3d5eb3a34891673307ee7068221a7f8f288ec1a769c238daa60965733f4
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.SOURCE_ARTIFACT }}
+          path: exact_input
+          repository: evansmusitu/mft-education-nexus-executor
+          run-id: ${{ env.SOURCE_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Verify exact APK bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="$(find exact_input -name '*.apk' -type f | head -1)"
+          test -f "$APK"
+          echo "${EXPECTED_APK_SHA256}  $APK" | sha256sum -c -
+          echo "APK=$APK" >> "$GITHUB_ENV"
+      - name: Enable KVM access
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Boot API36 and exercise exact APK
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 36
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          script: |
+            adb install -r "$APK" | tee emulator_install.txt
+            adb logcat -c
+            adb shell am start -W -n "$LAUNCH_COMPONENT" | tee emulator_start.txt
+            sleep 12
+            adb shell pidof "$PACKAGE_ID" | tr -d '\r' | tee emulator_pid.txt
+            adb shell dumpsys window windows | grep -E 'mCurrentFocus|mFocusedApp' | tee emulator_focus.txt || true
+            adb logcat -d -v threadtime | tee emulator_logcat.txt
+            adb exec-out screencap -p > emulator_screen.png
+            test -s emulator_pid.txt
+            grep -F "$PACKAGE_ID" emulator_focus.txt || true
+            if grep -E 'FATAL EXCEPTION|Process: com\.musitu\.sovereigninstitution.*has died|AndroidRuntime.*FATAL' emulator_logcat.txt; then exit 41; fi
+            printf 'EMULATOR_LAUNCH_PASS\napk_sha256=%s\n' "$EXPECTED_APK_SHA256" | tee emulator_smoke.txt
+      - name: Upload exact-device evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: api36-exact-artifact-smoke-${{ github.run_id }}
+          path: |
+            emulator_install.txt
+            emulator_start.txt
+            emulator_pid.txt
+            emulator_focus.txt
+            emulator_logcat.txt
+            emulator_screen.png
+            emulator_smoke.txt
+          if-no-files-found: warn
+          retention-days: 30
