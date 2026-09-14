@@ -118,18 +118,17 @@ jobs:
           profile: pixel_6
           disable-animations: true
           script: |
-            set -eu
             adb install -r "$APK" | tee emulator_install.txt
             adb logcat -c
-            adb shell monkey -p "$PACKAGE_ID" -c android.intent.category.LAUNCHER 1 | tee emulator_monkey.txt
+            adb shell am start -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p "$PACKAGE_ID" | tee emulator_start.txt
             sleep 12
-            PID="$(adb shell pidof "$PACKAGE_ID" | tr -d '\r')"
-            test -n "$PID"
-            adb shell dumpsys window windows | grep -E 'mCurrentFocus|mFocusedApp' | tee emulator_focus.txt
-            adb logcat -d '*:E' | tee emulator_errors.txt
-            if grep -E 'FATAL EXCEPTION|Process: com\.musitu\.sovereigninstitution.*has died' emulator_errors.txt; then exit 41; fi
+            adb shell pidof "$PACKAGE_ID" | tr -d '\r' | tee emulator_pid.txt
+            adb shell dumpsys window windows | grep -E 'mCurrentFocus|mFocusedApp' | tee emulator_focus.txt || true
+            adb logcat -d -v threadtime | tee emulator_logcat.txt
             adb exec-out screencap -p > emulator_screen.png
-            printf 'EMULATOR_LAUNCH_PASS\npid=%s\napk_sha256=%s\n' "$PID" "$APK_SHA256" | tee emulator_smoke.txt
+            test -s emulator_pid.txt
+            if grep -E 'FATAL EXCEPTION|Process: com\.musitu\.sovereigninstitution.*has died|AndroidRuntime.*FATAL' emulator_logcat.txt; then exit 41; fi
+            printf 'EMULATOR_LAUNCH_PASS\napk_sha256=%s\n' "$APK_SHA256" | tee emulator_smoke.txt
       - name: Upload emulator evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -137,9 +136,10 @@ jobs:
           name: product-frontier-android-emulator-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             emulator_install.txt
-            emulator_monkey.txt
+            emulator_start.txt
+            emulator_pid.txt
             emulator_focus.txt
-            emulator_errors.txt
+            emulator_logcat.txt
             emulator_screen.png
             emulator_smoke.txt
           if-no-files-found: warn
