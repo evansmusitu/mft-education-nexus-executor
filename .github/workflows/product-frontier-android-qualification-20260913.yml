@@ -5,12 +5,14 @@ on:
     paths: ['product_frontier_android_20260913/**','.github/workflows/product-frontier-android-qualification-20260913.yml']
 permissions: {contents: read}
 env:
-  SOURCE_ZIP_SHA256: 14ba42284e284f902adef81e1049c021a67cb053c99db9db47b97d0b1706edb3
-  SOURCE_MANIFEST_SHA256: 2f0d1f2c9724e9704bfe122c270412a49c5aebc63984d49e32850c6d56f4666c
-  V3_PACKAGE_SHA256: 90fab790cf696ca6fd65ceb30815bc7175f1f59abddc6f096ae471cee7ae5f21
+  PARENT_V2_ZIP_SHA256: 14ba42284e284f902adef81e1049c021a67cb053c99db9db47b97d0b1706edb3
+  PARENT_V2_MANIFEST_SHA256: 2f0d1f2c9724e9704bfe122c270412a49c5aebc63984d49e32850c6d56f4666c
+  V4_MANIFEST_SHA256: 420a024390a4a9a94acaa4ff4ee169f6e800d13e03633215cd0db0e03035ca0c
+  V4_SEALED_ZIP_SHA256: 921964b0fd8fb566b1f02faa9c59aa290dc61b6365532cac1cd58f8d4b6ef21e
   ANDROID_DIR: android_qualification_work/MFT_SOVEREIGN_INSTITUTION_ANDROID_FRONTIER_HARDENED_SOURCE
   PACKAGE_ID: com.musitu.sovereigninstitution
-  EXPO_PUBLIC_MFT_API_URL: https://institution.example.invalid
+  LAUNCH_COMPONENT: com.musitu.sovereigninstitution/.MainActivity
+  EXPO_PUBLIC_MUSITU_API_URL: https://institution.example.invalid
   NODE_ENV: production
   CI: '1'
 jobs:
@@ -20,29 +22,75 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: {ref: product-frontier-android-20260913}
-      - name: Reassemble verify V2 and apply sealed V3 dependency correction
+      - name: Verify V2 parent and materialize exact sealed V4 payload
         run: |
           set -euo pipefail
-          cat product_frontier_android_20260913/sealed_v2.b64.{1,2,3,4} | base64 -d > /tmp/sealed.zip
-          echo "${SOURCE_ZIP_SHA256}  /tmp/sealed.zip" | sha256sum -c -
+          cat product_frontier_android_20260913/sealed_v2.b64.{1,2,3,4} | base64 -d > /tmp/sealed-v2.zip
+          echo "${PARENT_V2_ZIP_SHA256}  /tmp/sealed-v2.zip" | sha256sum -c -
           rm -rf android_qualification_work && mkdir android_qualification_work
-          unzip -q /tmp/sealed.zip -d android_qualification_work
+          unzip -q /tmp/sealed-v2.zip -d android_qualification_work
           cd "$ANDROID_DIR"
-          echo "${SOURCE_MANIFEST_SHA256}  SHA256SUMS.txt" | sha256sum -c -
+          echo "${PARENT_V2_MANIFEST_SHA256}  SHA256SUMS.txt" | sha256sum -c -
           sha256sum -c SHA256SUMS.txt
           python - <<'PY'
           import json
-          p='package.json'
-          d=json.load(open(p))
+          from pathlib import Path
+
+          p=Path('package.json')
+          d=json.loads(p.read_text())
+          d['name']='musitu-sovereign-institution-android-frontier'
+          d['version']='0.1.1'
           d['devDependencies']['typescript']='~6.0.3'
-          open(p,'w').write(json.dumps(d,indent=2)+'\n')
+          p.write_text(json.dumps(d,indent=2)+'\n')
+
+          p=Path('app.json')
+          d=json.loads(p.read_text())
+          d['expo']['name']='MUSITU Sovereign Institution Intelligence'
+          d['expo']['slug']='musitu-sovereign-institution'
+          d['expo']['version']='0.1.1'
+          d['expo']['android']['versionCode']=2
+          p.write_text(json.dumps(d,indent=2)+'\n')
+
+          p=Path('App.tsx')
+          s=p.read_text()
+          old="const API_URL = process.env.EXPO_PUBLIC_MFT_API_URL || 'https://institution.example.invalid';"
+          new="const API_URL = process.env.EXPO_PUBLIC_MUSITU_API_URL || process.env.EXPO_PUBLIC_MFT_API_URL || 'https://institution.example.invalid';"
+          assert old in s
+          s=s.replace(old,new,1)
+          old_brand="fontWeight:'800',marginVertical:12}}>MFT</Text>"
+          new_brand="fontWeight:'800',marginVertical:12}}>MUSITU</Text>"
+          assert old_brand in s
+          s=s.replace(old_brand,new_brand,1)
+          p.write_text(s)
+
+          p=Path('README.md')
+          s=p.read_text()
+          assert s.startswith('# MFT Android Frontier client')
+          s=s.replace('# MFT Android Frontier client','# MUSITU Android Frontier client',1)
+          old='This runtime does not contain an Android SDK or installed Expo dependency tree, so no APK/AAB build is claimed by this reconstruction.'
+          new='This sealed source package contains no prebuilt APK/AAB. Build and API-36 device qualification are performed externally and must remain hash-bound to the qualified source and artifacts.'
+          assert old in s
+          p.write_text(s.replace(old,new,1))
+
+          manifest='''c72491f0a2ce44b59c6a6cf13f52dfd58a54d045e660647fe5fcd382688daaca  App.tsx
+e3987a4480e9339bc770f234daa96afc668d2375250360c639b2f672ef351322  README.md
+aef8b29acafb2d3a4f9e739973c076ba7e6b3805299d198fca56b10a96dd00f1  app.json
+7894e906f4cb57e254d0a6fc21299b1b8fb9aa50282fe5353fd37f626ad8dc95  eas.json
+c1dfc94e2d317cd21d99a2c3653821aab0508115bebdd08af3d7a34f08f3d5a7  package.json
+2d8f0517832b3c0b8dded1132088dfc3dca0e1cfe1f68a356e652e816d2151bd  src/api.ts
+3e2c9e91531d347233f1a27aa061b95d77924fc1e63dd248b12b7f9d3b27d13b  src/offlineIntents.ts
+'''
+          Path('SHA256SUMS.txt').write_text(manifest)
           PY
-          echo "${V3_PACKAGE_SHA256}  package.json" | sha256sum -c -
+          echo "${V4_MANIFEST_SHA256}  SHA256SUMS.txt" | sha256sum -c -
+          sha256sum -c SHA256SUMS.txt
+          ! grep -q '>MFT</Text>' App.tsx
+          grep -q '>MUSITU</Text>' App.tsx
       - uses: actions/setup-node@v4
         with: {node-version: '22'}
       - uses: actions/setup-java@v4
         with: {distribution: temurin, java-version: '17'}
-      - name: Resolve validate and prebuild V3 candidate
+      - name: Resolve validate and prebuild V4 candidate
         run: |
           set -euo pipefail
           cd "$ANDROID_DIR"
@@ -50,13 +98,13 @@ jobs:
           npx expo-doctor
           npx expo prebuild --platform android --clean --no-install
           grep -R 'usesCleartextTraffic="false"' android/app/src/main/AndroidManifest.xml
-      - name: Build release APK and AAB
+      - name: Build V4 release APK and AAB
         run: |
           set -euo pipefail
           cd "$ANDROID_DIR/android"
           chmod +x gradlew
           ./gradlew --no-daemon clean lintRelease assembleRelease bundleRelease
-      - name: Inspect artifacts
+      - name: Inspect V4 artifacts
         run: |
           set -euo pipefail
           cd "$ANDROID_DIR"
@@ -66,33 +114,37 @@ jobs:
           BT="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)"
           "$BT/aapt" dump badging "$APK" | tee android_badging.txt
           grep "package: name='${PACKAGE_ID}'" android_badging.txt
+          grep "versionCode='2'" android_badging.txt
           grep "targetSdkVersion:'36'" android_badging.txt
+          grep "application-label:'MUSITU Sovereign Institution Intelligence'" android_badging.txt
           ! grep -q 'application-debuggable' android_badging.txt
           "$BT/apksigner" verify --verbose --print-certs "$APK" | tee apk_signing.txt
           sha256sum "$APK" "$AAB" | tee artifact_sha256.txt
+          cp SHA256SUMS.txt qualified_source_sha256.txt
       - uses: actions/upload-artifact@v4
         with:
-          name: product-frontier-android-build-${{ github.run_id }}-${{ github.run_attempt }}
+          name: product-frontier-android-v4-build-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             android_qualification_work/MFT_SOVEREIGN_INSTITUTION_ANDROID_FRONTIER_HARDENED_SOURCE/android/app/build/outputs/apk/release/*.apk
             android_qualification_work/MFT_SOVEREIGN_INSTITUTION_ANDROID_FRONTIER_HARDENED_SOURCE/android/app/build/outputs/bundle/release/*.aab
             android_qualification_work/MFT_SOVEREIGN_INSTITUTION_ANDROID_FRONTIER_HARDENED_SOURCE/android_badging.txt
             android_qualification_work/MFT_SOVEREIGN_INSTITUTION_ANDROID_FRONTIER_HARDENED_SOURCE/apk_signing.txt
             android_qualification_work/MFT_SOVEREIGN_INSTITUTION_ANDROID_FRONTIER_HARDENED_SOURCE/artifact_sha256.txt
+            android_qualification_work/MFT_SOVEREIGN_INSTITUTION_ANDROID_FRONTIER_HARDENED_SOURCE/qualified_source_sha256.txt
           if-no-files-found: error
           retention-days: 30
 
   emulator:
-    name: api36-release-apk-smoke
+    name: api36-v4-release-apk-smoke
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: product-frontier-android-build-${{ github.run_id }}-${{ github.run_attempt }}
+          name: product-frontier-android-v4-build-${{ github.run_id }}-${{ github.run_attempt }}
           path: emulator_input
-      - name: Pin exact APK hash from build evidence
+      - name: Pin exact V4 APK hash from build evidence
         shell: bash
         run: |
           set -euo pipefail
@@ -110,7 +162,7 @@ jobs:
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
-      - name: Boot API-36 emulator install and launch exact APK
+      - name: Boot API-36 emulator install and launch exact V4 APK
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 36
@@ -120,25 +172,23 @@ jobs:
           script: |
             adb install -r "$APK" | tee emulator_install.txt
             adb logcat -c
-            adb shell am start -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p "$PACKAGE_ID" | tee emulator_start.txt
+            adb shell am start -W -n "$LAUNCH_COMPONENT" | tee emulator_start.txt
             sleep 12
             adb shell pidof "$PACKAGE_ID" | tr -d '\r' | tee emulator_pid.txt
-            adb shell dumpsys window windows | grep -E 'mCurrentFocus|mFocusedApp' | tee emulator_focus.txt || true
             adb logcat -d -v threadtime | tee emulator_logcat.txt
             adb exec-out screencap -p > emulator_screen.png
             test -s emulator_pid.txt
             if grep -E 'FATAL EXCEPTION|Process: com\.musitu\.sovereigninstitution.*has died|AndroidRuntime.*FATAL' emulator_logcat.txt; then exit 41; fi
-            printf 'EMULATOR_LAUNCH_PASS\napk_sha256=%s\n' "$APK_SHA256" | tee emulator_smoke.txt
-      - name: Upload emulator evidence
+            printf 'EMULATOR_V4_LAUNCH_PASS\napk_sha256=%s\n' "$APK_SHA256" | tee emulator_smoke.txt
+      - name: Upload V4 emulator evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: product-frontier-android-emulator-${{ github.run_id }}-${{ github.run_attempt }}
+          name: product-frontier-android-v4-emulator-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             emulator_install.txt
             emulator_start.txt
             emulator_pid.txt
-            emulator_focus.txt
             emulator_logcat.txt
             emulator_screen.png
             emulator_smoke.txt
