@@ -1,0 +1,47 @@
+name: MCN072 Nexus-referenced Cloudflare Account GET-only (NO DEPLOY)
+on:
+  push:
+    branches:
+      - audit/mcn072-cloudflare-account-scope-readonly-20261114
+    paths:
+      - .github/workflows/mcn072-cloudflare-account-scope-readonly-20261114.yml
+permissions:
+  contents: read
+jobs:
+  inspect:
+    if: >-
+      github.repository == 'evansmusitu/mft-education-nexus-executor' &&
+      github.ref == 'refs/heads/audit/mcn072-cloudflare-account-scope-readonly-20261114' &&
+      github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - name: Checkout code without persisted credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Verify source and fail-closed tests before injecting Cloudflare secret
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git hash-object qualification/mcn072_account_scope_readonly.py)" = 'a1332ed716183bf4a1ad7156dc937b36e008ceb6'
+          test "$(git hash-object tests/test_mcn072_account_scope_readonly.py)" = '5ad7b951c66c60e307c9c75cb20d7427ff738547'
+          PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests -p 'test_mcn072_account_scope_readonly.py' -v
+      - name: GET-only compare Nexus Cloudflare account metadata
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          PYTHONDONTWRITEBYTECODE=1 python3 -B qualification/mcn072_account_scope_readonly.py
+      - name: Save only sanitized NO-GO account/Queue fingerprints
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: musitu-mcn072-nexus-account-scope-getonly-20261114
+          path: |
+            mcn072-cloudflare-all-account-scopes.json
+            mcn072-cloudflare-all-account-scopes.json.sha256
+          retention-days: 7
+          if-no-files-found: warn
